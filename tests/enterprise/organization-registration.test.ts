@@ -95,8 +95,13 @@ describe("Organization Registration by Organization Admin Test Suite", () => {
     }),
   };
 
+  const mockEmailService = {
+    sendNotificationEmail: vi.fn().mockResolvedValue({ success: true, messageId: "msg_test_123" }),
+  };
+
   const organizationService = createOrganizationService({
     organizationRepo,
+    emailService: mockEmailService as any,
     otpService: mockOtpService as any,
   });
 
@@ -106,7 +111,7 @@ describe("Organization Registration by Organization Admin Test Suite", () => {
     role: "USER", // Non-super admin actor (Organization Admin submitter)
   };
 
-  it("Test 1: Organization Admin registers organization -> created in PROVISIONING state and OTP sent to organization email", async () => {
+  it("Test 1: Organization Admin registers organization -> created in PROVISIONING state and email dispatched to admin email", async () => {
     const input = {
       name: "Apollo Healthcare Trust",
       type: TenantType.HOSPITAL,
@@ -130,17 +135,20 @@ describe("Organization Registration by Organization Admin Test Suite", () => {
     expect(result.organization.statusReason).toBe("Pending platform administrator approval");
     expect(result.organization.createdById).toBe("usr_org_admin_01");
 
-    // Enforce OTP was dispatched to the organization's email address
-    expect(result.otpSent).toBe(true);
-    expect(result.previewOtp).toBe("123456");
-    expect(mockOtpService.sendOtp).toHaveBeenCalledWith({
-      email: "contact@apollo-trust.org",
-      purpose: "Organization Registration Verification",
-      recipientName: "Apollo Healthcare Trust",
-    });
+    // Enforce notification mail was dispatched to the Administrator Email (not OTP)
+    expect(result.mailSent).toBe(true);
+    expect(result.adminEmail).toBe("rajesh.sharma@apollo-trust.org");
+    expect(mockEmailService.sendNotificationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toEmail: "rajesh.sharma@apollo-trust.org",
+        recipientName: "Dr. Rajesh Sharma",
+        subject: expect.stringContaining("Apollo Healthcare Trust"),
+      })
+    );
   });
 
   it("Test 2: Verifying the OTP successfully validates the organization email", async () => {
+    sentOtps.set("contact@apollo-trust.org", "123456");
     const verifyResult = await organizationService.verifyOrganizationEmail({
       organizationId: "tenant_any",
       email: "contact@apollo-trust.org",
@@ -199,20 +207,124 @@ describe("Organization Registration by Organization Admin Test Suite", () => {
     expect(visibleToAdmin2).toBeNull();
   });
 
-  it("Test 6: Super admin approves organization and transitions status from PROVISIONING to ACTIVE", async () => {
-    const createdOrg = Array.from(tenantStore.values())[0];
+  it("Test 6: Super admin approves organization -> transitions status to ACTIVE and sends approval email to admin", async () => {
+    const superAdminActor: AuthUser = {
+      id: "usr_super_admin",
+      email: "superadmin@platform.com",
+      role: Role.ADMIN, // Super/Platform admin role
+    };
 
-    // Atomically transition status from PROVISIONING to ACTIVE
-    const transitioned = await organizationRepo.transition(
+    const createdOrg = Array.from(tenantStore.values())[0];
+    // Ensure it's in PROVISIONING
+    tenantStore.set(createdOrg.id, {
+      ...createdOrg,
+      status: TenantStatus.PROVISIONING,
+      Administrator: "Dr. Rajesh Sharma",
+      AdministratorEmail: "rajesh.sharma@apollo-trust.org",
+    });
+
+    const approvalResult = await organizationService.approveOrganization(
       createdOrg.id,
-      TenantStatus.PROVISIONING,
-      { status: TenantStatus.ACTIVE, statusReason: "Approved by Platform Admin" }
+      superAdminActor,
+      "All medical council accreditations verified."
     );
 
-    expect(transitioned).toBe(true);
+    expect(approvalResult.status).toBe(TenantStatus.ACTIVE);
+    expect(approvalResult.mailSent).toBe(true);
+    expect(approvalResult.adminEmail).toBe("rajesh.sharma@apollo-trust.org");
+    expect(mockEmailService.sendNotificationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toEmail: "rajesh.sharma@apollo-trust.org",
+        subject: expect.stringContaining("Organization Approved"),
+        title: "Organization Registration Approved",
+      })
+    );
 
     const updated = tenantStore.get(createdOrg.id);
     expect(updated.status).toBe(TenantStatus.ACTIVE);
-    expect(updated.statusReason).toBe("Approved by Platform Admin");
+    expect(updated.statusReason).toContain("Approved by Platform Admin");
+  });
+
+  it("Test 7: Non-super admin cannot approve organization", async () => {
+    const normalUserActor: AuthUser = {
+      id: "usr_regular",
+      email: "user@test.com",
+      role: Role.USER,
+    };
+
+    const createdOrg = Array.from(tenantStore.values())[0];
+
+    await expect(
+      organizationService.approveOrganization(createdOrg.id, normalUserActor)
+    ).rejects.toThrow("Only platform administrators can approve organizations");
+  });
+
+  it("Test 8: Super admin rejects organization -> transitions status to SUSPENDED and sends not-approved email with reason", async () => {
+    const superAdminActor: AuthUser = {
+      id: "usr_super_admin",
+      email: "superadmin@platform.com",
+      role: Role.ADMIN,
+    };
+
+    // Register a second organization to test rejection
+    const org2 = await organizationService.registerOrganization(
+      {
+        name: "Unverified Clinic",
+        type: TenantType.CLINIC,
+        Administrator: "John Doe",
+        Assigned_TenantRole: Role.ADMIN,
+        email: "contact@unverified.org",
+        AdministratorEmail: "john@unverified.org",
+      },
+      orgAdminActor
+    );
+
+    expect(org2.organization.status).toBe(TenantStatus.PROVISIONING);
+
+    const rejectionResult = await organizationService.rejectOrganization(
+      org2.organization.id,
+      superAdminActor,
+      "Invalid licensing documents provided"
+    );
+
+    expect(rejectionResult.status).toBe(TenantStatus.SUSPENDED);
+    expect(rejectionResult.mailSent).toBe(true);
+    expect(rejectionResult.adminEmail).toBe("john@unverified.org");
+    expect(rejectionResult.reason).toBe("Invalid licensing documents provided");
+
+    expect(mockEmailService.sendNotificationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toEmail: "john@unverified.org",
+        subject: expect.stringContaining("Organization Registration Not Approved"),
+        title: "Organization Registration Not Approved",
+      })
+    );
+
+    const updated = tenantStore.get(org2.organization.id);
+    expect(updated.status).toBe(TenantStatus.SUSPENDED);
+    expect(updated.statusReason).toBe("Invalid licensing documents provided");
+  });
+
+  it("Test 9: Super admin can list organizations pending approval", async () => {
+    const superAdminActor: AuthUser = {
+      id: "usr_super_admin",
+      email: "superadmin@platform.com",
+      role: Role.ADMIN,
+    };
+
+    // Mock findMany on prisma tenant for list
+    mockPrisma.tenant.findMany = vi.fn().mockImplementation(async ({ where, take }: any) => {
+      const results: any[] = [];
+      for (const t of tenantStore.values()) {
+        if (where?.status && t.status !== where.status) continue;
+        results.push(t);
+        if (take && results.length >= take) break;
+      }
+      return results;
+    });
+
+    const pendingPage = await organizationService.listPendingOrganizations(superAdminActor, { limit: 10 });
+    expect(pendingPage).toBeDefined();
+    expect(Array.isArray(pendingPage.items)).toBe(true);
   });
 });

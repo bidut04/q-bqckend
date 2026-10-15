@@ -32,6 +32,8 @@ export const organizationSelect = {
     slug: true,
     type: true,
     email: true,
+    Administrator: true,
+    AdministratorEmail: true,
     phone: true,
     country: true,
     timezone: true,

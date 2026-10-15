@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { OrganizationController } from "./organization.controller";
 import { requireAuth } from "../../middleware/auth.middleware";
+import { requireAdmin } from "../../middleware/admin.middleware";
 
 export const createOrganizationRouter = (controller: OrganizationController) => {
   const router = Router();
@@ -9,8 +10,15 @@ export const createOrganizationRouter = (controller: OrganizationController) => 
   router.post("/", controller.register);
   router.post("/register", controller.register);
 
-  // Verify OTP sent to organization email
+  // Verify OTP sent to organization email (optional verification)
   router.post("/verify-otp", controller.verifyOtp);
+
+  // Super Admin: List organizations pending approval
+  router.get("/pending-approval", requireAuth, requireAdmin, controller.listPending);
+
+  // Super Admin: Review decisions (Approve / Reject)
+  router.post("/:id/approve", requireAuth, requireAdmin, controller.approve);
+  router.post("/:id/reject", requireAuth, requireAdmin, controller.reject);
 
   // Authenticated: view organization profile
   router.get("/:id", requireAuth, controller.getById);

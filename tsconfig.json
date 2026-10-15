@@ -14,7 +14,6 @@
   "include": [
     "src/**/*",
     "utils/**/*",
-    "src/config/**/*",
     "app.ts",
     "server.ts"
   ],

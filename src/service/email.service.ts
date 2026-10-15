@@ -196,6 +196,90 @@ export class BrevoEmailService {
       );
     }
   }
+
+  /**
+   * Send Generic / Status Notification Email via Brevo API
+   */
+  public async sendNotificationEmail(options: {
+    toEmail: string;
+    recipientName?: string;
+    subject: string;
+    title: string;
+    messageHtml: string;
+  }): Promise<{ success: boolean; messageId?: string }> {
+    const { toEmail, recipientName, subject, title, messageHtml } = options;
+    const client = this.getClient();
+    const senderEmail = this.getSenderEmail();
+    const senderName = this.getSenderName();
+
+    if (!client) {
+      console.log("=================================================");
+      console.log("📨 [DEV EMAIL SANDBOX] BREVO_API_KEY not configured");
+      console.log(`To: ${toEmail} (${recipientName || "Admin"})`);
+      console.log(`Subject: ${subject}`);
+      console.log("=================================================");
+      return { success: true, messageId: "dev-sandbox-mode" };
+    }
+
+    try {
+      const htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${title}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f4f6f8; margin: 0; padding: 24px; color: #1e293b; }
+    .container { max-width: 560px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
+    .header { background: linear-gradient(135deg, #0ea5e9, #0284c7); padding: 28px 24px; text-align: center; color: #ffffff; }
+    .header h1 { margin: 0; font-size: 22px; font-weight: 700; }
+    .content { padding: 32px 28px; line-height: 1.6; }
+    .footer { background-color: #f8fafc; padding: 18px 24px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>${title}</h1>
+    </div>
+    <div class="content">
+      ${messageHtml}
+    </div>
+    <div class="footer">
+      &copy; ${new Date().getFullYear()} ePaper QueueFlow. All rights reserved.
+    </div>
+  </div>
+</body>
+</html>
+      `.trim();
+
+      const response = await client.transactionalEmails.sendTransacEmail({
+        sender: {
+          email: senderEmail,
+          name: senderName,
+        },
+        to: [
+          {
+            email: toEmail,
+            name: recipientName || toEmail,
+          },
+        ],
+        subject,
+        htmlContent,
+      });
+
+      const messageId = (response as any)?.messageId || "sent";
+      console.log(`✅ [Brevo] Notification Email delivered to ${toEmail} (ID: ${messageId})`);
+      return { success: true, messageId };
+    } catch (error: any) {
+      console.error("❌ [Brevo] Failed to send email via Brevo:", error?.message || error);
+      throw new AppError(
+        `Failed to send notification email: ${error?.message || "Brevo provider error"}`,
+        502,
+        "EMAIL_DELIVERY_FAILED"
+      );
+    }
+  }
 }
 
 export const emailService = new BrevoEmailService();
