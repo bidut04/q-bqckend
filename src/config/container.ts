@@ -16,6 +16,8 @@ import { createFormRepository } from "../repository/form.repository";
 import { createAuthService } from "../service/auth.service";
 import { createBookingService } from "../modules/booking/booking.service";
 import { QueueService } from "../modules/queue/queue.service";
+import { createOrganizationService } from "../modules/organization/organization.service";
+import { otpService } from "../service/otp.service";
 
 // Controllers
 import { createAuthController } from "../controllers/auth.controller";
@@ -23,6 +25,7 @@ import { otpController } from "../controllers/otp.controller";
 import { createBookingController } from "../modules/booking/booking.controller";
 import { createQueueController } from "../modules/queue/queue.controller";
 import { createFormController } from "../modules/form/form.controller";
+import { createOrganizationController } from "../modules/organization/organization.controller";
 
 export const createContainer = () => {
   // Repositories
@@ -49,12 +52,20 @@ export const createContainer = () => {
     customerRepo: customerRepository,
   });
   const queueService = new QueueService();
+  const organizationService = createOrganizationService({
+    organizationRepo: organizationRepository,
+    otpService,
+  });
 
   // Controllers
   const authController = createAuthController(authService);
   const bookingController = createBookingController({ bookingService, bookingRepository });
   const queueController = createQueueController({ queueService, queueRepository });
   const formController = createFormController({ formRepository });
+  const organizationController = createOrganizationController({
+    organizationService,
+    organizationRepository,
+  });
 
   return {
     prisma,
@@ -73,6 +84,7 @@ export const createContainer = () => {
       auth: authService,
       booking: bookingService,
       queue: queueService,
+      organization: organizationService,
     },
     controllers: {
       auth: authController,
@@ -80,6 +92,7 @@ export const createContainer = () => {
       booking: bookingController,
       queue: queueController,
       form: formController,
+      organization: organizationController,
     },
   };
 };
