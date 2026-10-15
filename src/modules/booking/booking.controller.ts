@@ -1,0 +1,56 @@
+import { Request, Response, NextFunction } from "express";
+import { BookingService } from "./booking.service";
+import { BookingRepository } from "./booking.repository";
+import { getTenantContextFromRequest } from "../../core/tenant/tenant-context.helper";
+
+export const createBookingController = (deps: {
+  bookingService: BookingService;
+  bookingRepository: BookingRepository;
+}) => {
+  const create = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const result = await deps.bookingService.createBooking(context, req.body);
+      res.status(201).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const getById = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const result = await deps.bookingRepository.findById(context, req.params.id as string);
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const getByBranch = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const result = await deps.bookingRepository.findByBranch(context, req.params.branchId as string);
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  return {
+    create,
+    getById,
+    getByBranch,
+  };
+};
+
+export type BookingController = ReturnType<typeof createBookingController>;

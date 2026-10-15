@@ -1,0 +1,2386 @@
+// ============================================================================
+// QUEUEFLOW — MERGED SCHEMA  (your existing schema + admin/tenant/RBAC system)
+// ----------------------------------------------------------------------------
+// LEGEND
+//   [NEW]      = added in this merge (field, enum value, index or whole model)
+//   [CATALOG]  = lives in the global catalog/control-plane DB
+//   [SHARD]    = lives in the tenant shard DB (every row carries tenantId)
+//
+// MERGE RULES USED
+//   * NOTHING existing was renamed, removed or re-typed -> additive migration.
+//   * Existing `Location` == "Branch" in the spec. Kept as Location.
+//   * Existing enum typos (MICROSOFTF, RE_QUED) are kept; renaming = breaking.
+//   * [SHARD] tables never FK to `User` (User is catalog-only). They store the
+//     userId as a plain indexed string. [CATALOG] tables may FK to User.
+//   * Composite FK hardening: parents got @@unique([tenantId, id]) so new
+//     child tables can use (tenantId, parentId) FKs and can never point at
+//     another tenant's row.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS — AUTH (unchanged)
+// ============================================================
+
+enum Role {
+  USER
+  MANAGER
+  ADMIN
+}
+
+enum AuthProvider {
+  LOCAL
+  GOOGLE
+  GITHUB
+  MICROSOFTF
+}
+
+enum TokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+  MAGIC_LINK
+}
+
+enum RefreshTokenStatus {
+  ACTIVE
+  ROTATED
+  REVOKED
+  REUSED
+  EXPIRED
+}
+
+enum RevokeReason {
+  LOGOUT
+  LOGOUT_ALL
+  TOKEN_ROTATION
+  TOKEN_REUSE
+  PASSWORD_CHANGED
+  ACCOUNT_DISABLED
+  ADMIN_REVOKED
+  SECURITY_EVENT
+  EXPIRED
+}
+
+enum MfaType {
+  TOTP
+  WEBAUTHN
+}
+
+enum AuditAction {
+  // Authentication
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGOUT
+  LOGOUT_ALL
+
+  // Registration / verification
+  ACCOUNT_CREATED
+  EMAIL_VERIFICATION_REQUESTED
+  EMAIL_VERIFIED
+
+  // Password
+  PASSWORD_CHANGE
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+
+  // Token
+  TOKEN_REFRESH
+  TOKEN_REUSE_DETECTED
+  SESSION_CREATED
+  SESSION_REVOKED
+
+  // MFA
+  MFA_ENABLED
+  MFA_DISABLED
+  MFA_CHALLENGE_SUCCESS
+  MFA_CHALLENGE_FAILED
+  MFA_RECOVERY_CODE_USED
+
+  // OAuth
+  OAUTH_LOGIN
+  OAUTH_ACCOUNT_LINKED
+  OAUTH_ACCOUNT_UNLINKED
+
+  // Account
+  ACCOUNT_LOCKED
+  ACCOUNT_UNLOCKED
+  ACCOUNT_DISABLED
+  ACCOUNT_ENABLED
+
+  // Authorization
+  ROLE_CHANGED
+
+  // Security
+  SUSPICIOUS_LOGIN
+  SECURITY_EVENT
+}
+
+enum NewsType {
+  PUBLISHED
+  DRAFT
+}
+
+// ============================================================
+// USER  [CATALOG]  (global auth identity — unchanged except back-relations)
+// ============================================================
+// NOTE: User.role (USER/MANAGER/ADMIN) is NOT used for platform/tenant
+// authority any more. Platform power = PlatformMember, tenant power =
+// TenantMember + UserRoleAssignment. Keep User.role for legacy checks only.
+
+model User {
+  id String @id @default(uuid())
+
+  // Store normalized lowercase email.
+  email String @unique @db.VarChar(255)
+
+  passwordHash String? @map("password_hash") @db.VarChar(255)
+
+  role Role @default(USER)
+
+  isVerified Boolean @default(false) @map("is_verified")
+  isActive   Boolean @default(true) @map("is_active")
+
+  // Increment on password change / disable / logout-all; JWT carries it.
+  securityVersion Int @default(0) @map("security_version")
+
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockoutUntil        DateTime? @map("lockout_until")
+  lastLoginAt         DateTime? @map("last_login_at")
+  lastLoginIp         String?   @map("last_login_ip") @db.VarChar(45)
+
+  passwordChangedAt DateTime? @map("password_changed_at")
+
+  mfaEnabled Boolean @default(false) @map("mfa_enabled")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  accounts           Account[]
+  sessions           Session[]
+  refreshTokens      RefreshToken[]
+  verificationTokens VerificationToken[]
+  mfaMethods         MfaMethod[]
+  recoveryCodes      RecoveryCode[]
+  mfaChallenges      MfaChallenge[]
+  loginAttempts      LoginAttempt[]
+  auditLogs          AuditLog[]
+  media              Media[]
+
+  // [NEW] platform / tenant authority
+  platformMember    PlatformMember?
+  tenantMemberships TenantMember[]
+  supportSessions   SupportAccessSession[]
+
+  @@index([role])
+  @@index([isActive])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model Account {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  provider AuthProvider
+
+  providerAccountId String @map("provider_account_id") @db.VarChar(255)
+
+  // Store ONLY if needed. Encrypt before storing.
+  accessTokenEncrypted  String? @map("access_token_encrypted") @db.Text
+  refreshTokenEncrypted String? @map("refresh_token_encrypted") @db.Text
+
+  accessTokenExpiresAt DateTime? @map("access_token_expires_at")
+
+  scope String? @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@index([provider])
+  @@map("accounts")
+}
+
+// One Session = one login/device. Many rotated refresh tokens per session.
+model Session {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  userAgent  String? @map("user_agent") @db.Text
+  ipAddress  String? @map("ip_address") @db.VarChar(45)
+  deviceName String? @map("device_name") @db.VarChar(255)
+
+  isRevoked    Boolean       @default(false) @map("is_revoked")
+  revokedAt    DateTime?     @map("revoked_at")
+  revokeReason RevokeReason? @map("revoke_reason")
+
+  expiresAt      DateTime @map("expires_at")
+  lastActivityAt DateTime @default(now()) @map("last_activity_at")
+
+  // [NEW] set while a platform user is acting in SUPPORT MODE
+  supportSessionId String? @map("support_session_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@index([userId, isRevoked])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// NEVER store the raw token; store SHA-256. Rotation family = reuse detection.
+model RefreshToken {
+  id String @id @default(uuid())
+
+  userId    String @map("user_id")
+  sessionId String @map("session_id")
+
+  tokenHash String @unique @map("token_hash") @db.VarChar(64)
+
+  familyId String @map("family_id")
+
+  status RefreshTokenStatus @default(ACTIVE)
+
+  previousTokenId String? @unique @map("previous_token_id")
+  nextTokenId     String? @unique @map("next_token_id")
+
+  rotatedAt    DateTime?     @map("rotated_at")
+  revokedAt    DateTime?     @map("revoked_at")
+  revokeReason RevokeReason? @map("revoke_reason")
+
+  expiresAt DateTime @map("expires_at")
+
+  ipAddress String? @map("ip_address") @db.VarChar(45)
+  userAgent String? @map("user_agent") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  previousToken RefreshToken? @relation("RefreshTokenChain", fields: [previousTokenId], references: [id], onDelete: SetNull)
+  nextToken     RefreshToken? @relation("RefreshTokenChain")
+
+  @@index([userId])
+  @@index([sessionId])
+  @@index([familyId])
+  @@index([familyId, status])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model VerificationToken {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  tokenHash String @unique @map("token_hash") @db.VarChar(64)
+
+  type TokenType
+
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([expiresAt])
+  @@index([type, expiresAt])
+  @@map("verification_tokens")
+}
+
+model MfaMethod {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  type MfaType
+
+  // TOTP secret — encrypt before storing.
+  secretEncrypted String? @map("secret_encrypted") @db.Text
+
+  // WebAuthn
+  credentialId String? @map("credential_id") @db.VarChar(512)
+  publicKey    String? @map("public_key") @db.Text
+
+  verifiedAt DateTime? @map("verified_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, credentialId])
+  @@index([userId])
+  @@index([userId, type])
+  @@map("mfa_methods")
+}
+
+// Store SHA-256(recoveryCode), never plaintext.
+model RecoveryCode {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  codeHash String @unique @map("code_hash") @db.VarChar(64)
+
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, usedAt])
+  @@map("recovery_codes")
+}
+
+model MfaChallenge {
+  id String @id @default(uuid())
+
+  userId String @map("user_id")
+
+  challengeHash String @unique @map("challenge_hash") @db.VarChar(64)
+
+  attempts    Int @default(0)
+  maxAttempts Int @default(5) @map("max_attempts")
+
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("mfa_challenges")
+}
+
+// History for brute-force / suspicious-login detection.
+model LoginAttempt {
+  id     String  @id @default(uuid())
+  userId String? @map("user_id")
+
+  email String @db.VarChar(255)
+
+  success Boolean
+
+  failureReason String? @map("failure_reason") @db.VarChar(255)
+
+  ipAddress String? @map("ip_address") @db.VarChar(45)
+  userAgent String? @map("user_agent") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([email])
+  @@index([ipAddress])
+  @@index([createdAt])
+  @@index([email, createdAt])
+  @@index([ipAddress, createdAt])
+  @@map("login_attempts")
+}
+
+// Security/auth audit. Append-only. (Admin/tenant audit = AdminAuditLog below.)
+model AuditLog {
+  id String @id @default(uuid())
+
+  userId String? @map("user_id")
+
+  action AuditAction
+
+  ipAddress String? @map("ip_address") @db.VarChar(45)
+  userAgent String? @map("user_agent") @db.Text
+  requestId String? @map("request_id") @db.VarChar(100)
+
+  details Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// MEDIA / HERO (unchanged)
+// ============================================================
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+enum MediaStatus {
+  ACTIVE
+  DELETED
+}
+
+enum HeroStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model Media {
+  id String @id @default(cuid())
+
+  type   MediaType
+  status MediaStatus @default(ACTIVE)
+
+  provider        String @default("IMAGEKIT")
+  providerAssetId String @unique
+
+  url          String
+  thumbnailUrl String?
+
+  fileName String
+  mimeType String
+
+  sizeBytes       BigInt
+  width           Int?
+  height          Int?
+  durationSeconds Decimal?
+
+  folder String?
+
+  uploadedById String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  uploadedBy User @relation(fields: [uploadedById], references: [id])
+
+  desktopHeroes Hero[] @relation("HeroDesktopMedia")
+  mobileHeroes  Hero[] @relation("HeroMobileMedia")
+
+  @@index([uploadedById])
+  @@index([type])
+  @@index([status])
+}
+
+model Hero {
+  id String @id @default(cuid())
+
+  festivalId String
+
+  title       String
+  subtitle    String?
+  description String?
+
+  desktopMediaId String?
+  mobileMediaId  String?
+
+  ctaLabel String?
+  ctaUrl   String?
+
+  position Int
+
+  status HeroStatus @default(DRAFT)
+
+  isVisible Boolean @default(true)
+
+  startsAt DateTime?
+  endsAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  desktopMedia Media? @relation("HeroDesktopMedia", fields: [desktopMediaId], references: [id])
+  mobileMedia  Media? @relation("HeroMobileMedia", fields: [mobileMediaId], references: [id])
+
+  @@unique([festivalId, position])
+  @@index([festivalId, status])
+  @@index([festivalId, isVisible])
+}
+
+// ============================================================
+// TENANT & QUEUE — ENUMS (existing + [NEW] values)
+// ============================================================
+
+enum TenantType {
+  BANK
+  CLINIC
+  HOSPITAL
+  POST_OFFICE
+  GOVERNMENT
+  DIAGNOSTIC_CENTER
+  UNIVERSITY
+  RETAIL
+  CORPORATE
+  OTHER
+  CUSTOMER_SERVICE // [NEW]
+}
+
+// Lifecycle: PROVISIONING -> ACTIVE -> SUSPENDED -> ACTIVE -> DEACTIVATING -> ARCHIVED
+// INACTIVE / DELETED are LEGACY values kept for existing rows (map INACTIVE->SUSPENDED, DELETED->ARCHIVED over time).
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+  MIGRATING
+  DELETED
+  PROVISIONING // [NEW]
+  DEACTIVATING // [NEW]
+  ARCHIVED // [NEW]
+}
+
+enum LocationStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  MAINTENANCE // [NEW]
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  TERMINATED
+  INVITED // [NEW]
+}
+
+// OPEN is LEGACY (== AVAILABLE). Migrate OPEN -> AVAILABLE, then stop writing OPEN.
+enum CounterStatus {
+  OPEN
+  CLOSED
+  PAUSED
+  BUSY
+  AVAILABLE // [NEW]
+  OFFLINE // [NEW]
+  MAINTENANCE // [NEW]
+}
+
+// Queue (the lane) open/closed — unchanged.
+enum QueueStatus {
+  OPEN
+  CLOSED
+  PAUSED
+}
+
+enum QueueEntryStatus {
+  WAITING
+  CALLED
+  SERVING
+  COMPLETED
+  NO_SHOW
+  RE_QUED
+  CANCELLED
+  ON_HOLD // [NEW]
+  TRANSFERRED // [NEW]
+}
+
+enum QueueEntrySource {
+  ONLINE
+  WALK_IN
+  EMPLOYEE
+  IMPORT
+  API
+  BOOKING // [NEW]
+  TRANSFER // [NEW]
+}
+
+enum QueueEventType {
+  CREATED
+  CALLED
+  SERVING_STARTED
+  COMPLETED
+  CANCELLED
+  REQUEUED
+  NO_SHOW
+  TRANSFERRED
+  COUNTER_CHANGED
+  PRIORITY_CHANGED
+  MANUAL_CREATED
+  RECALLED // [NEW]
+  HELD // [NEW]
+  RESUMED // [NEW]
+}
+
+// ============================================================
+// TENANT  [CATALOG authoritative; replicated read-only row on its shard]
+// ============================================================
+// Tenant.shardId IS the persisted tenant -> shard mapping (matches Shard.code).
+// Existing tenants are never re-hashed; hash ring only places NEW tenants.
+
+model Tenant {
+  id String @id @default(cuid())
+
+  name      String
+  slug      String?      @unique
+  type      TenantType
+  status    TenantStatus @default(ACTIVE)
+  email     String?
+  phone     String?
+  timezone  String?      @default("Asia/Kolkata")
+  currency  String       @default("INR")
+  setting   Json?
+  shardId   String       @default("shard_01") @map("shard_id")
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  // [NEW]
+  legalName           String?
+  country             String?      @db.Char(2)
+  statusReason        String?      @db.VarChar(500)
+  shardMappingVersion Int          @default(1) // fencing token; bump on every mapping change
+  writeFenced         Boolean      @default(false) // true during migration cutover: shard rejects writes
+  activatedAt         DateTime?
+  suspendedAt         DateTime?
+  archivedAt          DateTime?
+  lastActivityAt      DateTime?
+  retentionUntil      DateTime?
+  deletedAt           DateTime? // soft delete only
+  createdById         String?
+  Administrator       String
+  AdministratorEmail  String?
+  Direct_phone_number Int?
+  Assigned_TenantRole Role
+  locations           Location[]
+  employees           Employee[]
+  services            Service[]
+  counters            Counter[]
+  queues              Queue[]
+  queueEntries        QueueEntry[]
+  roles               TenantRole[]
+  permissions         Permission[]
+  customers           Customer[]
+
+  // [NEW]
+  subscriptions    Subscription[]
+  members          TenantMember[]
+  shardHistory     TenantShardHistory[]
+  usageSnapshots   UsageSnapshot[]
+  supportSessions  SupportAccessSession[]
+  featureFlagRules FeatureFlagRule[]
+
+  @@index([status])
+  @@index([shardId, status]) // [NEW]
+  @@index([type]) // [NEW]
+  @@map("tenants")
+}
+
+model Location {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  name     String
+  code     String
+  address  Json?
+  phone    String?
+  timezone String?
+
+  status LocationStatus @default(ACTIVE)
+
+  email     String? // [NEW]
+  deletedAt DateTime? // [NEW]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  employees    EmployeeLocation[]
+  services     LocationService[]
+  counters     Counter[]
+  queues       Queue[]
+  queueEntries QueueEntry[]
+
+  // [NEW]
+  businessHours LocationBusinessHours[]
+  holidays      LocationHoliday[]
+  bookings      Booking[]
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id]) // [NEW] composite-FK target
+  @@index([tenantId])
+  @@map("locations")
+}
+
+model Employee {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  employeeCode String
+  name         String
+  email        String?
+  phone        String?
+
+  passwordHash String?
+
+  status EmployeeStatus @default(ACTIVE)
+
+  // [NEW] optional link to the global auth identity (User is catalog-only -> no FK)
+  userId     String?
+  department String?   @db.VarChar(100)
+  invitedAt  DateTime?
+  deletedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roles     EmployeeRole[]
+  locations EmployeeLocation[]
+  counters  CounterEmployee[]
+
+  createdQueueEntries QueueEntry[]      @relation("CreatedByEmployee")
+  actionEvents        QueueEntryEvent[] @relation("ActorEmployee")
+
+  // [NEW]
+  services EmployeeService[]
+
+  @@unique([tenantId, employeeCode])
+  @@unique([tenantId, id]) // [NEW]
+  @@unique([tenantId, userId]) // [NEW] (NULLs allowed)
+  @@index([tenantId, status])
+  @@map("employees")
+}
+
+model EmployeeLocation {
+  employeeId String
+  locationId String
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+  location Location @relation(fields: [locationId], references: [id])
+
+  isPrimary Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@id([employeeId, locationId])
+  @@map("employee_locations")
+}
+
+// ============================================================
+// RBAC (existing per-tenant roles/permissions, extended)
+// ============================================================
+// Authorization = ROLE + PERMISSION + SCOPE.
+//  - EmployeeRole (existing)  : legacy grant, implicit scope = employee's EmployeeLocation rows.
+//  - UserRoleAssignment (NEW) : explicit scope (TENANT / LOCATION / SERVICE / COUNTER / SELF).
+// Both resolve to the same TenantRole -> Permission set.
+
+enum ScopeType {
+  PLATFORM
+  TENANT
+  LOCATION // == BRANCH
+  SERVICE
+  COUNTER
+  SELF
+}
+
+model TenantRole {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  name        String
+  description String?
+
+  isSystem Boolean @default(false)
+
+  // [NEW] highest scope this role may be granted at (blocks privilege escalation)
+  maxScope ScopeType @default(LOCATION)
+
+  employees   EmployeeRole[]
+  permissions RolePermission[]
+
+  // [NEW]
+  assignments UserRoleAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id]) // [NEW]
+  @@map("tenant_roles")
+}
+
+model EmployeeRole {
+  employeeId String
+  roleId     String
+
+  employee Employee   @relation(fields: [employeeId], references: [id])
+  role     TenantRole @relation(fields: [roleId], references: [id])
+
+  @@id([employeeId, roleId])
+  @@map("employee_roles")
+}
+
+model Permission {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  key         String
+  description String?
+
+  roles RolePermission[]
+
+  @@unique([tenantId, key])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       TenantRole @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ============================================================
+// SERVICES / COUNTERS / QUEUES (existing, extended)
+// ============================================================
+
+enum ServiceStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Service {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  name        String
+  code        String?
+  description String?
+
+  // [NEW]
+  status               ServiceStatus @default(ACTIVE)
+  estimatedDurationSec Int           @default(300)
+  priorityRules        Json?
+  deletedAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  locations         LocationService[]
+  counters          CounterService[]
+  queues            Queue[]
+  queueEntries      QueueEntry[]
+  serviceStatistics ServiceStatistic[]
+
+  // [NEW]
+  bookings Booking[]
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id]) // [NEW]
+  @@index([tenantId])
+  @@map("services")
+}
+
+// "Do not assume every service exists in every branch."
+model LocationService {
+  locationId String
+  serviceId  String
+
+  location Location @relation(fields: [locationId], references: [id])
+  service  Service  @relation(fields: [serviceId], references: [id])
+
+  enabled Boolean @default(true)
+
+  // [NEW]
+  bookingEnabled      Boolean @default(true)
+  queueEnabled        Boolean @default(true)
+  durationOverrideSec Int?
+
+  // [NEW]
+  bookings         Booking[]
+  slots            ServiceSlot[]
+  employeeServices EmployeeService[]
+
+  @@id([locationId, serviceId])
+  @@map("location_services")
+}
+
+model Counter {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  name String
+  code String
+
+  status CounterStatus @default(CLOSED)
+
+  currentEmployeeId String?
+
+  // [NEW] heartbeat: hot value lives in Redis; these are throttled durable checkpoints
+  lastHeartbeatAt     DateTime?
+  offlineDetectedAt   DateTime?
+  currentQueueEntryId String? // plain ref (avoids FK cycle)
+
+  services     CounterService[]
+  employees    CounterEmployee[]
+  queues       Queue[]
+  queueEntries QueueEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([locationId, code])
+  @@unique([tenantId, id]) // [NEW]
+  @@index([tenantId, locationId])
+  @@index([status, lastHeartbeatAt]) // [NEW] offline sweeper
+  @@map("counters")
+}
+
+// Counter -> CounterService -> Service. Routing only offers a counter its listed services.
+model CounterService {
+  counterId String
+  serviceId String
+
+  counter Counter @relation(fields: [counterId], references: [id])
+  service Service @relation(fields: [serviceId], references: [id])
+
+  priority Int     @default(0)
+  enabled  Boolean @default(true)
+
+  @@id([counterId, serviceId])
+  @@map("counter_services")
+}
+
+model CounterEmployee {
+  counterId  String
+  employeeId String
+
+  counter  Counter  @relation(fields: [counterId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  assignedAt DateTime @default(now())
+  active     Boolean  @default(true)
+
+  @@id([counterId, employeeId])
+  @@map("counter_employees")
+}
+
+model Queue {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id])
+
+  name String
+  code String
+
+  status QueueStatus @default(CLOSED)
+
+  tokenPrefix String?
+  tokenStart  Int     @default(1)
+
+  // [NEW] atomic ticket numbering:
+  //   UPDATE queues SET lastTokenNumber = LAST_INSERT_ID(lastTokenNumber + 1) WHERE id = ?
+  lastTokenNumber Int @default(0)
+
+  settings Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  counters Counter[]
+  entries  QueueEntry[]
+  policy   QueuePolicy?
+
+  @@unique([locationId, code])
+  @@index([tenantId, locationId, serviceId])
+  @@map("queues")
+}
+
+model QueueEntry {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  queueId String
+  queue   Queue  @relation(fields: [queueId], references: [id])
+
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id])
+
+  tokenNumber Int
+  tokenLabel  String
+
+  status QueueEntryStatus @default(WAITING)
+
+  source QueueEntrySource @default(ONLINE)
+
+  createdByEmployeeId String?
+  createdByEmployee   Employee? @relation("CreatedByEmployee", fields: [createdByEmployeeId], references: [id])
+
+  currentCounterId String?
+  currentCounter   Counter? @relation(fields: [currentCounterId], references: [id])
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  priority Int @default(0)
+
+  calledAt    DateTime?
+  servingAt   DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+  noShowAt    DateTime?
+
+  // Business timers are DATA, not setTimeout():
+  //   CALLED  -> expiresAt = calledAt + grace   (worker flips to NO_SHOW atomically)
+  //   ON_HOLD -> expiresAt = hold limit
+  expiresAt DateTime?
+
+  metadata Json?
+
+  // [NEW]
+  bookingId         String?
+  booking           Booking? @relation(fields: [tenantId, bookingId], references: [tenantId, id])
+  version           Int      @default(0) // optimistic lock: UPDATE .. WHERE id=? AND status=? AND version=?
+  priorityClass     String?  @db.VarChar(32)
+  effectivePriority Int      @default(0) // recomputed by aging worker
+  requeueCount      Int      @default(0)
+  waitSeconds       Int?
+  serviceSeconds    Int?
+  etaP50Sec         Int?
+  etaP90Sec         Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events QueueEntryEvent[]
+
+  // [NEW]
+  transfersFrom QueueTransfer[] @relation("TransferFromEntry")
+  transfersTo   QueueTransfer[] @relation("TransferToEntry")
+
+  @@unique([queueId, tokenNumber])
+  @@unique([tenantId, id]) // [NEW]
+  @@unique([tenantId, bookingId]) // [NEW] one queue entry per booking
+  @@index([tenantId, locationId, status])
+  @@index([queueId, status])
+  @@index([queueId, createdAt])
+  @@index([status, expiresAt]) // [NEW] no-show / hold worker
+  @@index([queueId, status, effectivePriority, createdAt]) // [NEW] call-next hot path
+  @@map("queue_entries")
+}
+
+model QueueEntryEvent {
+  id String @id @default(uuid())
+
+  tenantId String
+
+  queueEntryId String
+  queueEntry   QueueEntry @relation(fields: [queueEntryId], references: [id])
+
+  actorEmployeeId String?
+  actorEmployee   Employee? @relation("ActorEmployee", fields: [actorEmployeeId], references: [id])
+
+  type QueueEventType
+
+  fromStatus QueueEntryStatus?
+  toStatus   QueueEntryStatus?
+
+  reason String?
+
+  metadata Json?
+
+  // [NEW]
+  actorType String? @db.VarChar(16) // EMPLOYEE | CUSTOMER | SYSTEM
+  counterId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, queueEntryId, createdAt])
+  @@map("queue_entry_events")
+}
+
+// ============================================================
+// QUEUE POLICY (existing per-queue, extended) + scope defaults
+// ============================================================
+// Resolution order: Queue policy > Service default > Location default > Tenant default.
+
+enum SchedulingStrategy {
+  FIFO
+  PRIORITY
+  WEIGHTED_PRIORITY
+  AGING
+  PRIORITY_WITH_MAX_WAIT
+}
+
+model QueuePolicy {
+  id String @id @default(uuid())
+
+  queueId String @unique
+  queue   Queue  @relation(fields: [queueId], references: [id])
+
+  callGracePeriodSeconds Int @default(180)
+
+  allowRequeue       Boolean @default(true)
+  maxRequeueAttempts Int     @default(1)
+
+  allowManualToken Boolean @default(true)
+  allowOnlineToken Boolean @default(true)
+  allowWalkInToken Boolean @default(true)
+
+  allowPriority Boolean @default(false)
+
+  autoNoShow Boolean @default(true)
+
+  settings Json?
+
+  // [NEW]
+  strategy           SchedulingStrategy @default(FIFO)
+  maxHoldSeconds     Int?
+  maximumWaitSeconds Int?
+  priorityRules      Json? // [{class:"SENIOR",weight:5}]
+  aging              Json? // {intervalSec:300,boostPerInterval:1,cap:10}
+  holdPolicy         Json?
+  version            Int                @default(1)
+
+  @@map("queue_policies")
+}
+
+// [NEW][SHARD] default policy at TENANT / LOCATION / SERVICE scope.
+// scopeId is NOT NULL (tenantId for TENANT scope) so the UNIQUE works in MySQL.
+model QueuePolicyDefault {
+  id        String             @id @default(uuid())
+  tenantId  String
+  scopeType ScopeType
+  scopeId   String
+  strategy  SchedulingStrategy @default(FIFO)
+
+  callGracePeriodSeconds Int      @default(180)
+  allowRequeue           Boolean  @default(true)
+  maxRequeueAttempts     Int      @default(1)
+  maxHoldSeconds         Int?
+  maximumWaitSeconds     Int?
+  priorityRules          Json?
+  aging                  Json?
+  holdPolicy             Json?
+  version                Int      @default(1)
+  updatedBy              String?
+  updatedAt              DateTime @updatedAt
+
+  @@unique([tenantId, scopeType, scopeId])
+  @@map("queue_policy_defaults")
+}
+
+// ============================================================
+// CUSTOMER (existing, extended for self-service)
+// ============================================================
+
+enum CustomerStatus {
+  ACTIVE
+  BLOCKED
+  DELETED
+}
+
+model Customer {
+  id String @id @default(uuid())
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  name  String?
+  phone String?
+  email String?
+
+  externalReference String?
+
+  metadata Json?
+
+  // [NEW]
+  userId                    String? // link to global auth User (self-service login); no FK (catalog table)
+  customerNo                String?        @db.VarChar(32)
+  status                    CustomerStatus @default(ACTIVE)
+  profileData               Json?
+  registrationFormVersionId String?
+  lastVisitAt               DateTime?
+  deletedAt                 DateTime? // soft delete / PII-erased marker
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  queueEntries QueueEntry[]
+
+  // [NEW]
+  identifiers   CustomerIdentifier[]
+  bookings      Booking[]
+  notifications Notification[]
+
+  @@unique([tenantId, id]) // [NEW]
+  @@unique([tenantId, customerNo]) // [NEW]
+  @@unique([tenantId, userId]) // [NEW]
+  @@index([tenantId, phone])
+  @@index([tenantId, email]) // [NEW]
+  @@index([tenantId, status]) // [NEW]
+  @@map("customers")
+}
+
+// ============================================================
+// METRICS / IDEMPOTENCY / MIGRATION (existing, extended)
+// ============================================================
+
+model ServiceStatistic {
+  id String @id @default(uuid())
+
+  tenantId  String
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id])
+
+  date DateTime
+
+  sampleCount Int @default(0)
+
+  averageSeconds Int?
+  medianSeconds  Int?
+  p75Seconds     Int?
+  p90Seconds     Int?
+  p95Seconds     Int?
+
+  @@unique([serviceId, date])
+  @@index([tenantId, date])
+}
+
+model IdempotencyKey {
+  id String @id @default(uuid())
+
+  tenantId String
+
+  key         String
+  requestHash String
+
+  responseStatus Int?
+  responseBody   Json?
+
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+
+  // [NEW]
+  scope   String? @db.VarChar(64) // BOOKING_CREATE, EMPLOYEE_INVITE ...
+  actorId String?
+
+  @@unique([tenantId, key])
+  @@index([expiresAt])
+}
+
+// Status values (String kept for compatibility):
+// REQUESTED, VALIDATING, COPYING, CATCHING_UP, VERIFYING,
+// READY_FOR_CUTOVER [NEW], CUTOVER, COMPLETED, FAILED,
+// ROLLING_BACK [NEW], ROLLED_BACK [NEW]
+model TenantMigration {
+  id          String @id @default(uuid())
+  tenantId    String @map("tenant_id")
+  sourceShard String @map("source_shard")
+  targetShard String @map("target_shard")
+  status      String @default("REQUESTED")
+
+  progressPercent Int     @default(0) @map("progress_percent")
+  lastProcessedId String? @map("last_processed_id")
+  rowsCopied      BigInt  @default(0) @map("rows_copied")
+  rowsVerified    BigInt  @default(0) @map("rows_verified")
+
+  retryCount     Int       @default(0) @map("retry_count")
+  workerId       String?   @map("worker_id")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+
+  startedAt          DateTime? @map("started_at")
+  cutoverStartedAt   DateTime? @map("cutover_started_at")
+  cutoverCompletedAt DateTime? @map("cutover_completed_at")
+  completedAt        DateTime? @map("completed_at")
+
+  errorCode    String? @map("error_code")
+  errorMessage String? @map("error_message")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // [NEW]
+  reason               String?   @db.VarChar(500)
+  initiatedById        String?   @map("initiated_by_id")
+  mfaVerifiedAt        DateTime? @map("mfa_verified_at")
+  idempotencyKey       String?   @map("idempotency_key") @db.VarChar(128)
+  // = tenantId while non-terminal, NULL when terminal -> at most ONE active migration per tenant
+  activeLockKey        String?   @unique @map("active_lock_key")
+  sourceMappingVersion Int?      @map("source_mapping_version")
+  rowCountsSource      Json?     @map("row_counts_source")
+  checksums            Json?
+  rolledBackAt         DateTime? @map("rolled_back_at")
+  rollbackReason       String?   @map("rollback_reason") @db.VarChar(500)
+
+  steps TenantMigrationStep[]
+
+  @@unique([tenantId, idempotencyKey]) // [NEW]
+  @@index([tenantId, status])
+  @@map("tenant_migrations")
+}
+
+model ShardMigrationRun {
+  id              String    @id @default(uuid())
+  runId           String    @map("run_id")
+  targetShard     String    @map("target_shard")
+  targetType      String    @map("target_type") // CATALOG or SHARD
+  status          String    @default("PENDING") // PENDING, RUNNING, SUCCESS, FAILED
+  appliedVersion  String?   @map("applied_version")
+  executionTimeMs Int?      @map("execution_time_ms")
+  errorMessage    String?   @map("error_message")
+  startedAt       DateTime  @default(now()) @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+
+  @@index([runId, status])
+  @@map("shard_migration_runs")
+}
+
+// ############################################################################
+// ############################################################################
+//                        [NEW]  PLATFORM CONTROL PLANE
+// ############################################################################
+// ############################################################################
+
+enum PlatformRoleType {
+  PLATFORM_OWNER
+  PLATFORM_ADMIN
+  PLATFORM_SUPPORT
+}
+
+enum MemberStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+}
+
+enum TenantAdminRole {
+  TENANT_OWNER
+  TENANT_ADMIN
+  TENANT_MANAGER
+}
+
+enum BillingCycle {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum ShardStatus {
+  PROVISIONING
+  ACTIVE
+  DRAINING // no NEW tenants placed; existing keep working
+  READ_ONLY
+  UNHEALTHY
+  DECOMMISSIONED
+}
+
+enum HealthState {
+  HEALTHY
+  DEGRADED
+  DOWN
+  UNKNOWN
+}
+
+enum Severity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING
+  MITIGATED
+  RESOLVED
+}
+
+enum IncidentComponent {
+  API
+  DATABASE
+  REDIS
+  KAFKA
+  WORKERS
+  SOCKET_IO
+  SHARD
+  OUTBOX
+  NOTIFICATIONS
+}
+
+enum FlagRuleScope {
+  GLOBAL
+  TENANT
+  BRANCH
+  PERCENTAGE
+}
+
+enum SupportSessionStatus {
+  REQUESTED
+  ACTIVE
+  ENDED
+  EXPIRED
+  REVOKED
+}
+
+enum MigrationStepStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+// [CATALOG] platform authority for a User. Absence of a row = no platform access.
+model PlatformMember {
+  id          String           @id @default(uuid())
+  userId      String           @unique
+  role        PlatformRoleType
+  status      MemberStatus     @default(INVITED)
+  mfaRequired Boolean          @default(true)
+  createdById String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([role, status])
+  @@map("platform_members")
+}
+
+// [CATALOG] role -> permission (e.g. PLATFORM_SUPPORT -> platform:organization:read)
+model PlatformRolePermission {
+  role          PlatformRoleType
+  permissionKey String           @db.VarChar(100)
+  isDangerous   Boolean          @default(false) // requires MFA + reason
+
+  @@id([role, permissionKey])
+  @@map("platform_role_permissions")
+}
+
+// [CATALOG] which Users belong to which tenant. adminRole set for owner/admin/manager;
+// branch admins / employees are NULL here and get scoped roles via UserRoleAssignment.
+model TenantMember {
+  id           String           @id @default(uuid())
+  tenantId     String
+  userId       String
+  adminRole    TenantAdminRole?
+  status       MemberStatus     @default(INVITED)
+  lastActiveAt DateTime?
+  createdById  String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@index([tenantId, adminRole])
+  @@map("tenant_members")
+}
+
+// [CATALOG]
+model Region {
+  id       String  @id @default(uuid())
+  code     String  @unique @db.VarChar(32) // ap-south-1
+  name     String  @db.VarChar(100)
+  isActive Boolean @default(true)
+
+  shards Shard[]
+
+  @@map("regions")
+}
+
+// [CATALOG] Shard catalog. Shard.code == Tenant.shardId.
+model Shard {
+  id              String      @id @default(uuid())
+  code            String      @unique @db.VarChar(32) // "shard_01"
+  regionId        String
+  connectionRef   String      @db.VarChar(255) // secrets-manager reference ONLY
+  redisRef        String?     @db.VarChar(255)
+  kafkaClusterRef String?     @db.VarChar(255)
+  weight          Int         @default(100) // consistent-hash weight for NEW placement
+  tenantCapacity  Int         @default(500)
+  tenantCount     Int         @default(0)
+  status          ShardStatus @default(PROVISIONING)
+  readOnly        Boolean     @default(false)
+  dbHealth        HealthState @default(UNKNOWN)
+  redisHealth     HealthState @default(UNKNOWN)
+  kafkaHealth     HealthState @default(UNKNOWN)
+  lastHealthAt    DateTime?
+  schemaVersion   String?     @db.VarChar(64)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  region          Region                @relation(fields: [regionId], references: [id])
+  healthSnapshots ShardHealthSnapshot[]
+
+  @@index([regionId, status])
+  @@map("shards")
+}
+
+// [CATALOG]
+model ShardHealthSnapshot {
+  id             String      @id @default(uuid())
+  shardId        String
+  dbHealth       HealthState
+  redisHealth    HealthState
+  kafkaHealth    HealthState
+  utilizationPct Decimal     @db.Decimal(5, 2)
+  p95LatencyMs   Int?
+  outboxLag      Int?
+  capturedAt     DateTime    @default(now())
+
+  shard Shard @relation(fields: [shardId], references: [id], onDelete: Cascade)
+
+  @@index([shardId, capturedAt])
+  @@map("shard_health_snapshots")
+}
+
+// [CATALOG] append-only mapping history -> rollback restores previous mapping.
+model TenantShardHistory {
+  id          String   @id @default(uuid())
+  tenantId    String
+  shardCode   String   @db.VarChar(32)
+  version     Int
+  reason      String   @db.VarChar(255) // INITIAL | MIGRATION_CUTOVER | ROLLBACK
+  migrationId String?
+  createdAt   DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, version])
+  @@map("tenant_shard_history")
+}
+
+// [CATALOG] resumable, auditable migration steps.
+model TenantMigrationStep {
+  id          String              @id @default(uuid())
+  migrationId String
+  seq         Int
+  name        String              @db.VarChar(64) // COPY_TABLE:bookings, VERIFY, FENCE_WRITES, FLIP_MAPPING...
+  status      MigrationStepStatus @default(PENDING)
+  cursor      String?             @db.VarChar(255)
+  attempts    Int                 @default(0)
+  error       String?             @db.Text
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  migration TenantMigration @relation(fields: [migrationId], references: [id], onDelete: Cascade)
+
+  @@unique([migrationId, seq])
+  @@map("tenant_migration_steps")
+}
+
+// [CATALOG]
+model Plan {
+  id           String   @id @default(uuid())
+  code         String   @unique @db.VarChar(50)
+  name         String   @db.VarChar(100)
+  limits       Json // {maxBranches,maxUsers,maxMonthlyBookings,features:[]}
+  priceMonthly Decimal  @db.Decimal(12, 2)
+  currency     String   @default("INR") @db.Char(3)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+// [CATALOG]
+model Subscription {
+  id                 String             @id @default(uuid())
+  tenantId           String
+  planId             String
+  status             SubscriptionStatus @default(TRIALING)
+  billingCycle       BillingCycle       @default(MONTHLY)
+  limitsOverride     Json?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelAtPeriodEnd  Boolean            @default(false)
+  externalBillingRef String?            @db.VarChar(128)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  plan   Plan   @relation(fields: [planId], references: [id])
+
+  @@index([tenantId, status])
+  @@map("subscriptions")
+}
+
+// [CATALOG] feature flags — evaluated by backend only.
+model FeatureFlag {
+  id             String   @id @default(uuid())
+  key            String   @unique @db.VarChar(100)
+  description    String?  @db.VarChar(500)
+  defaultEnabled Boolean  @default(false)
+  isKillSwitch   Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  rules FeatureFlagRule[]
+
+  @@map("feature_flags")
+}
+
+model FeatureFlagRule {
+  id          String        @id @default(uuid())
+  flagId      String
+  scope       FlagRuleScope
+  tenantId    String?
+  locationId  String? // BRANCH scope; row lives in shard -> no FK
+  percentage  Int? // 0..100, hashed on tenantId (stable)
+  enabled     Boolean
+  priority    Int           @default(0)
+  updatedById String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  flag   FeatureFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  tenant Tenant?     @relation(fields: [tenantId], references: [id])
+
+  @@index([flagId, scope])
+  @@index([tenantId])
+  @@map("feature_flag_rules")
+}
+
+// [CATALOG]
+model Incident {
+  id          String            @id @default(uuid())
+  title       String            @db.VarChar(255)
+  component   IncidentComponent
+  severity    Severity
+  status      IncidentStatus    @default(OPEN)
+  shardCode   String?           @db.VarChar(32)
+  tenantId    String?
+  summary     String?           @db.Text
+  ownerUserId String?
+  detectedBy  String            @db.VarChar(32) // MONITOR | MANUAL
+  openedAt    DateTime          @default(now())
+  mitigatedAt DateTime?
+  resolvedAt  DateTime?
+  updatedAt   DateTime          @updatedAt
+
+  updates IncidentUpdate[]
+
+  @@index([status, severity])
+  @@index([component, openedAt])
+  @@map("incidents")
+}
+
+model IncidentUpdate {
+  id           String         @id @default(uuid())
+  incidentId   String
+  authorUserId String?
+  status       IncidentStatus
+  message      String         @db.Text
+  createdAt    DateTime       @default(now())
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId, createdAt])
+  @@map("incident_updates")
+}
+
+// [CATALOG] short-lived, reason-required support access.
+model SupportAccessSession {
+  id                 String               @id @default(uuid())
+  userId             String
+  tenantId           String
+  reason             String               @db.VarChar(500)
+  status             SupportSessionStatus @default(REQUESTED)
+  accessLevel        String               @default("READ_ONLY") @db.VarChar(20)
+  permissionsGranted Json?
+  mfaVerifiedAt      DateTime?
+  idempotencyKey     String               @db.VarChar(128)
+  startedAt          DateTime?
+  expiresAt          DateTime // hard cap
+  endedAt            DateTime?
+  endedReason        String?              @db.VarChar(100)
+  createdAt          DateTime             @default(now())
+
+  user   User   @relation(fields: [userId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([userId, idempotencyKey])
+  @@index([tenantId, status])
+  @@index([status, expiresAt])
+  @@map("support_access_sessions")
+}
+
+// [CATALOG] pushed from shards via outbox; platform dashboard reads ONLY this
+// (no cross-shard queries).
+model UsageSnapshot {
+  id                String   @id @default(uuid())
+  tenantId          String
+  day               DateTime @db.Date
+  locations         Int      @default(0)
+  employees         Int      @default(0)
+  services          Int      @default(0)
+  counters          Int      @default(0)
+  customers         Int      @default(0)
+  bookings          Int      @default(0)
+  queueEntries      Int      @default(0)
+  activeQueues      Int      @default(0)
+  notificationsSent Int      @default(0)
+  storageBytes      BigInt   @default(0)
+  updatedAt         DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, day])
+  @@index([day])
+  @@map("usage_snapshots")
+}
+
+// [CATALOG]
+model PlatformSetting {
+  key         String   @id @db.VarChar(100)
+  category    String   @db.VarChar(32) // SECURITY | AUTH | RATE_LIMIT | INFRA | MAINTENANCE
+  value       Json
+  isSecretRef Boolean  @default(false)
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@map("platform_settings")
+}
+
+// [CATALOG] platform operations have no tenantId, so they get their own table.
+model PlatformIdempotencyKey {
+  id           String   @id @default(uuid())
+  scope        String   @db.VarChar(64) // ORG_CREATE, ADMIN_CREATE, MIGRATION_CREATE, SUPPORT_SESSION
+  actorId      String
+  key          String   @db.VarChar(128)
+  requestHash  String   @db.VarChar(64)
+  responseCode Int?
+  responseBody Json?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@unique([scope, actorId, key])
+  @@index([expiresAt])
+  @@map("platform_idempotency_keys")
+}
+
+// [CATALOG + SHARD] admin/tenant/platform audit (the existing AuditLog stays for auth events).
+// Append-only; give the app DB user INSERT/SELECT only. Partition by month in a raw migration.
+model AdminAuditLog {
+  id               String   @id @default(uuid())
+  tenantId         String? // NULL for pure platform actions
+  locationId       String?
+  actorUserId      String?
+  actorRole        String?  @db.VarChar(40)
+  supportSessionId String?
+  action           String   @db.VarChar(64) // TENANT_SUSPENDED, FORM_PUBLISHED, QUEUE_TRANSFERRED ...
+  resourceType     String   @db.VarChar(64)
+  resourceId       String?  @db.VarChar(64)
+  reason           String?  @db.VarChar(500)
+  metadata         Json? // NEVER passwords/tokens/secrets/sensitive form values
+  requestId        String?  @db.VarChar(64)
+  ip               String?  @db.VarChar(64)
+  createdAt        DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, resourceType, resourceId])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+  @@map("admin_audit_logs")
+}
+
+// [CATALOG + SHARD] transactional outbox. Written in the SAME tx as the state change;
+// a relay publishes to Kafka with retries -> Kafka outage != data loss.
+model OutboxEvent {
+  id            String       @id @default(uuid())
+  tenantId      String?
+  aggregateType String       @db.VarChar(64)
+  aggregateId   String       @db.VarChar(64)
+  eventType     String       @db.VarChar(100)
+  partitionKey  String       @db.VarChar(64)
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  nextAttemptAt DateTime     @default(now())
+  publishedAt   DateTime?
+  createdAt     DateTime     @default(now())
+
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, createdAt])
+  @@map("outbox_events")
+}
+
+// ############################################################################
+// ############################################################################
+//                      [NEW]  TENANT (SHARD) FEATURES
+// ############################################################################
+// ############################################################################
+
+// [SHARD] Tenant-level settings by namespace:
+// PROFILE | BOOKING | CUSTOMER | NOTIFICATION | LOGIN (approved identifiers) | EMPLOYEE_POLICY
+model TenantSetting {
+  id        String   @id @default(uuid())
+  tenantId  String
+  namespace String   @db.VarChar(40)
+  value     Json
+  version   Int      @default(1)
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, namespace])
+  @@map("tenant_settings")
+}
+
+// [SHARD] tenant default (locationId NULL) or per-location. scopeKey = locationId or tenantId.
+model LocationBusinessHours {
+  id         String  @id @default(uuid())
+  tenantId   String
+  locationId String?
+  scopeKey   String
+  weekday    Int     @db.TinyInt
+  opensAt    String  @db.Char(5)
+  closesAt   String  @db.Char(5)
+  isClosed   Boolean @default(false)
+
+  location Location? @relation(fields: [tenantId, locationId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, scopeKey, weekday, opensAt])
+  @@map("location_business_hours")
+}
+
+model LocationHoliday {
+  id         String   @id @default(uuid())
+  tenantId   String
+  locationId String?
+  scopeKey   String
+  date       DateTime @db.Date
+  name       String   @db.VarChar(150)
+
+  location Location? @relation(fields: [tenantId, locationId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, scopeKey, date])
+  @@map("location_holidays")
+}
+
+// [SHARD] scoped RBAC: User/Employee holds a TenantRole at a scope.
+//   BRANCH_ADMIN @ LOCATION(l1), BRANCH_ADMIN @ LOCATION(l2), EMPLOYEE @ COUNTER(c7)
+// userId = global User.id (no FK; catalog table). scopeId = tenantId for TENANT scope.
+model UserRoleAssignment {
+  id          String    @id @default(uuid())
+  tenantId    String
+  userId      String
+  roleId      String
+  scopeType   ScopeType
+  scopeId     String
+  grantedById String?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  role TenantRole @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, userId, roleId, scopeType, scopeId])
+  @@index([tenantId, userId])
+  @@index([tenantId, scopeType, scopeId])
+  @@map("user_role_assignments")
+}
+
+// [SHARD] which services an employee may serve at which location.
+model EmployeeService {
+  tenantId   String
+  employeeId String
+  locationId String
+  serviceId  String
+
+  employee        Employee        @relation(fields: [tenantId, employeeId], references: [tenantId, id], onDelete: Cascade)
+  locationService LocationService @relation(fields: [locationId, serviceId], references: [locationId, serviceId], onDelete: Cascade)
+
+  @@id([employeeId, locationId, serviceId])
+  @@index([tenantId, locationId, serviceId])
+  @@map("employee_services")
+}
+
+// [SHARD] approved login identifiers only: EMAIL | PHONE | CUSTOMER_ID | USERNAME
+enum LoginIdentifierType {
+  EMAIL
+  PHONE
+  CUSTOMER_ID
+  USERNAME
+}
+
+model CustomerIdentifier {
+  id         String              @id @default(uuid())
+  tenantId   String
+  customerId String
+  type       LoginIdentifierType
+  value      String              @db.VarChar(255) // normalised
+  verifiedAt DateTime?
+
+  customer Customer @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, type, value])
+  @@index([tenantId, customerId])
+  @@map("customer_identifiers")
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC FORMS: Form -> FormVersion -> FormField -> FormFieldOption
+// Published versions are IMMUTABLE. Edits create a new DRAFT version.
+// scope: TENANT (scopeId=tenantId) | LOCATION | SERVICE. Resolve SERVICE > LOCATION > TENANT.
+// ---------------------------------------------------------------------------
+enum FormPurpose {
+  REGISTRATION
+  LOGIN
+  BOOKING
+}
+
+enum FormVersionStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum FieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  EMAIL
+  PHONE
+  PASSWORD
+  DATE
+  TIME
+  DATETIME
+  RADIO
+  CHECKBOX
+  DROPDOWN
+  MULTI_SELECT
+  FILE
+  BOOLEAN
+}
+
+model Form {
+  id                 String      @id @default(uuid())
+  tenantId           String
+  purpose            FormPurpose
+  scopeType          ScopeType
+  scopeId            String
+  name               String      @db.VarChar(150)
+  publishedVersionId String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  deletedAt          DateTime?
+
+  versions FormVersion[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, purpose, scopeType, scopeId])
+  @@map("forms")
+}
+
+model FormVersion {
+  id          String            @id @default(uuid())
+  tenantId    String
+  formId      String
+  version     Int
+  status      FormVersionStatus @default(DRAFT)
+  layout      Json? // builder canvas metadata only; never authoritative
+  checksum    String?           @db.VarChar(64)
+  publishedAt DateTime?
+  publishedBy String?
+  archivedAt  DateTime?
+  createdBy   String?
+  createdAt   DateTime          @default(now())
+
+  form     Form        @relation(fields: [tenantId, formId], references: [tenantId, id], onDelete: Restrict)
+  fields   FormField[]
+  bookings Booking[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, formId, version])
+  @@index([tenantId, formId, status])
+  @@map("form_versions")
+}
+
+model FormField {
+  id                String    @id @default(uuid())
+  tenantId          String
+  formVersionId     String
+  key               String    @db.VarChar(64) // STABLE key (full_name, document_type), never the label
+  type              FieldType
+  label             String    @db.VarChar(200)
+  helpText          String?   @db.VarChar(500)
+  position          Int
+  enabled           Boolean   @default(true)
+  required          Boolean   @default(false)
+  validation        Json? // {min,max,minLength,maxLength,pattern,maxFiles,allowedMime,maxSizeBytes}
+  condition         Json? // {all:[{field:"x",op:"eq",value:"y"}]}
+  defaultValue      Json?
+  // security flags
+  sensitive         Boolean   @default(false) // never logged / never to analytics
+  encrypted         Boolean   @default(false)
+  searchable        Boolean   @default(false)
+  visibleToCustomer Boolean   @default(true)
+  visibleToStaff    Boolean   @default(true)
+
+  formVersion FormVersion       @relation(fields: [tenantId, formVersionId], references: [tenantId, id], onDelete: Cascade)
+  options     FormFieldOption[]
+
+  @@unique([tenantId, id])
+  @@unique([formVersionId, key])
+  @@index([tenantId, formVersionId, position])
+  @@map("form_fields")
+}
+
+model FormFieldOption {
+  id       String  @id @default(uuid())
+  tenantId String
+  fieldId  String
+  value    String  @db.VarChar(100) // PASSPORT | AADHAAR ... server allow-list
+  label    String  @db.VarChar(200)
+  position Int
+  enabled  Boolean @default(true)
+
+  field FormField @relation(fields: [tenantId, fieldId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([fieldId, value])
+  @@map("form_field_options")
+}
+
+// ---------------------------------------------------------------------------
+// BOOKINGS. A booking never mutates queue state directly:
+//   Created -> Confirmed -> Arrived -> (event) -> QueueEntry created
+// ---------------------------------------------------------------------------
+enum BookingStatus {
+  DRAFT
+  PENDING
+  CONFIRMED
+  ARRIVED
+  NO_SHOW
+  CANCELLED
+  COMPLETED
+}
+
+model ServiceSlot {
+  id          String   @id @default(uuid())
+  tenantId    String
+  locationId  String
+  serviceId   String
+  startsAt    DateTime
+  endsAt      DateTime
+  capacity    Int
+  // UPDATE .. SET bookedCount = bookedCount + 1 WHERE id=? AND bookedCount < capacity  (no overbooking)
+  bookedCount Int      @default(0)
+
+  locationService LocationService @relation(fields: [locationId, serviceId], references: [locationId, serviceId], onDelete: Cascade)
+  bookings        Booking[]
+
+  @@unique([tenantId, id])
+  @@unique([locationId, serviceId, startsAt])
+  @@index([tenantId, locationId, startsAt])
+  @@map("service_slots")
+}
+
+model Booking {
+  id                String        @id @default(uuid())
+  tenantId          String
+  bookingNo         String        @db.VarChar(32)
+  customerId        String
+  locationId        String
+  serviceId         String
+  slotId            String?
+  scheduledAt       DateTime
+  status            BookingStatus @default(PENDING)
+  formVersionId     String // exact version used at booking time (immutable history)
+  idempotencyKey    String        @db.VarChar(128)
+  cancelReason      String?       @db.VarChar(255)
+  rescheduledFromId String?
+  confirmedAt       DateTime?
+  arrivedAt         DateTime?
+  cancelledAt       DateTime?
+  version           Int           @default(0) // optimistic lock
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  deletedAt         DateTime?
+
+  customer        Customer        @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
+  location        Location        @relation(fields: [tenantId, locationId], references: [tenantId, id], onDelete: Restrict)
+  service         Service         @relation(fields: [tenantId, serviceId], references: [tenantId, id], onDelete: Restrict)
+  locationService LocationService @relation(fields: [locationId, serviceId], references: [locationId, serviceId], onDelete: Restrict)
+  formVersion     FormVersion     @relation(fields: [tenantId, formVersionId], references: [tenantId, id], onDelete: Restrict)
+  slot            ServiceSlot?    @relation(fields: [tenantId, slotId], references: [tenantId, id], onDelete: Restrict)
+
+  fieldValues BookingFieldValue[]
+  queueEntry  QueueEntry?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, bookingNo])
+  @@unique([tenantId, idempotencyKey]) // duplicate-booking protection
+  @@index([tenantId, locationId, scheduledAt])
+  @@index([tenantId, customerId, status])
+  @@index([tenantId, status, scheduledAt])
+  @@map("bookings")
+}
+
+// Hot operational values stay as Booking columns; everything else is here by STABLE field key.
+model BookingFieldValue {
+  id          String  @id @default(uuid())
+  tenantId    String
+  bookingId   String
+  fieldKey    String  @db.VarChar(64)
+  valueJson   Json?
+  valueEnc    String? @db.Text // envelope-encrypted ciphertext for encrypted fields
+  valueIndex  String? @db.VarChar(64) // HMAC blind index when searchable+encrypted
+  sensitive   Boolean @default(false)
+  fileAssetId String?
+
+  booking Booking @relation(fields: [tenantId, bookingId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([bookingId, fieldKey])
+  @@index([tenantId, fieldKey, valueIndex])
+  @@map("booking_field_values")
+}
+
+// ---------------------------------------------------------------------------
+// QUEUE TRANSFER  (old entry -> TRANSFERRED, new WAITING entry on target service)
+// ---------------------------------------------------------------------------
+model QueueTransfer {
+  id            String   @id @default(uuid())
+  tenantId      String
+  fromEntryId   String
+  toEntryId     String
+  fromServiceId String
+  toServiceId   String
+  locationId    String
+  employeeId    String?
+  reason        String   @db.VarChar(255)
+  createdAt     DateTime @default(now())
+
+  fromEntry QueueEntry @relation("TransferFromEntry", fields: [tenantId, fromEntryId], references: [tenantId, id], onDelete: Restrict)
+  toEntry   QueueEntry @relation("TransferToEntry", fields: [tenantId, toEntryId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, locationId, createdAt])
+  @@index([tenantId, fromEntryId])
+  @@map("queue_transfers")
+}
+
+// Hourly rollup with real percentiles (ServiceStatistic stays as the daily table).
+model QueueMetricRollup {
+  id                String   @id @default(uuid())
+  tenantId          String
+  locationId        String
+  serviceId         String
+  bucketStart       DateTime @db.DateTime(0)
+  arrivals          Int      @default(0)
+  completed         Int      @default(0)
+  noShows           Int      @default(0)
+  cancelled         Int      @default(0)
+  transferred       Int      @default(0)
+  waitP50Sec        Int?
+  waitP75Sec        Int?
+  waitP90Sec        Int?
+  waitP95Sec        Int?
+  svcP50Sec         Int?
+  svcP75Sec         Int?
+  svcP90Sec         Int?
+  svcP95Sec         Int?
+  maxQueueLen       Int      @default(0)
+  activeCountersAvg Decimal? @db.Decimal(6, 2)
+
+  @@unique([tenantId, locationId, serviceId, bucketStart])
+  @@index([tenantId, bucketStart])
+  @@map("queue_metric_rollups")
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATIONS (async worker, retry + backoff; never blocks queue ops)
+// ---------------------------------------------------------------------------
+enum NotificationChannel {
+  SMS
+  EMAIL
+  PUSH
+  IN_APP
+}
+
+enum NotificationEvent {
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  QUEUE_JOINED
+  ALMOST_YOUR_TURN
+  CALLED
+  NO_SHOW
+  SERVICE_TRANSFER
+  QUEUE_COMPLETED
+}
+
+enum DeliveryStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  DEAD
+}
+
+model NotificationTemplate {
+  id        String              @id @default(uuid())
+  tenantId  String
+  event     NotificationEvent
+  channel   NotificationChannel
+  locale    String              @default("en") @db.VarChar(10)
+  subject   String?             @db.VarChar(255)
+  body      String              @db.Text
+  isActive  Boolean             @default(true)
+  updatedAt DateTime            @updatedAt
+
+  @@unique([tenantId, event, channel, locale])
+  @@map("notification_templates")
+}
+
+model Notification {
+  id              String              @id @default(uuid())
+  tenantId        String
+  customerId      String?
+  recipientUserId String?
+  event           NotificationEvent
+  channel         NotificationChannel
+  destination     String?             @db.VarChar(255)
+  payload         Json? // template variables only; no sensitive form values
+  status          DeliveryStatus      @default(PENDING)
+  attempts        Int                 @default(0)
+  maxAttempts     Int                 @default(5)
+  nextAttemptAt   DateTime            @default(now())
+  providerRef     String?             @db.VarChar(128)
+  lastError       String?             @db.VarChar(500)
+  dedupeKey       String              @db.VarChar(128) // e.g. entryId:CALLED:SMS
+  readAt          DateTime?
+  sentAt          DateTime?
+  createdAt       DateTime            @default(now())
+
+  customer Customer? @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, dedupeKey])
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, customerId, createdAt])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// FILES (dynamic-form FILE fields) + DATA RETENTION
+// ---------------------------------------------------------------------------
+enum ScanStatus {
+  PENDING
+  CLEAN
+  INFECTED
+  SKIPPED
+}
+
+enum DataRequestStatus {
+  REQUESTED
+  PROCESSING
+  COMPLETED
+  REJECTED
+}
+
+model FileAsset {
+  id              String     @id @default(uuid())
+  tenantId        String
+  uploadedByType  String     @db.VarChar(16) // CUSTOMER | USER
+  uploadedById    String
+  storageKey      String     @db.VarChar(512) // private bucket; signed URLs only
+  detectedMime    String     @db.VarChar(100) // sniffed server-side; never trust client MIME
+  sizeBytes       BigInt
+  sha256          String     @db.VarChar(64)
+  originalNameEnc String?    @db.VarChar(512)
+  scanStatus      ScanStatus @default(PENDING)
+  retainUntil     DateTime?
+  createdAt       DateTime   @default(now())
+  deletedAt       DateTime?
+
+  @@index([tenantId, createdAt])
+  @@index([scanStatus])
+  @@map("file_assets")
+}
+
+model DataExportRequest {
+  id          String            @id @default(uuid())
+  tenantId    String
+  subjectType String            @db.VarChar(16) // CUSTOMER | TENANT
+  subjectId   String
+  status      DataRequestStatus @default(REQUESTED)
+  fileAssetId String?
+  requestedBy String
+  createdAt   DateTime          @default(now())
+  completedAt DateTime?
+
+  @@index([tenantId, status])
+  @@map("data_export_requests")
+}
+
+model ErasureRequest {
+  id          String            @id @default(uuid())
+  tenantId    String
+  customerId  String
+  status      DataRequestStatus @default(REQUESTED)
+  legalHold   Boolean           @default(false)
+  requestedBy String
+  scheduledAt DateTime?
+  completedAt DateTime?
+  createdAt   DateTime          @default(now())
+
+  @@index([tenantId, status])
+  @@map("erasure_requests")
+}
