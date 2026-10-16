@@ -140,6 +140,29 @@ export const createOrganizationController = (deps: {
     }
   };
 
+  const getReviewLogs = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const actor: AuthUser = {
+        id: req.user?.id || "anonymous",
+        email: req.user?.email,
+        role: req.user?.role || "USER",
+        tenantId: req.user?.tenantId,
+      };
+
+      const logs = await deps.organizationService.getOrganizationReviewLogs(
+        req.params.id as string,
+        actor
+      );
+
+      res.status(200).json({
+        success: true,
+        data: logs,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     register,
     verifyOtp,
@@ -147,6 +170,7 @@ export const createOrganizationController = (deps: {
     reject,
     listPending,
     getById,
+    getReviewLogs,
   };
 };
 

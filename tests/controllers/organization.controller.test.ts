@@ -191,4 +191,33 @@ describe("Organization Controller Unit Test Suite", () => {
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({ success: true, data: fakePage });
   });
+
+  it("should get review audit logs for an organization and return 200", async () => {
+    const fakeLogs = [
+      {
+        id: "rev_1",
+        tenantId: "org_123",
+        reviewerId: "usr_super_admin",
+        action: "APPROVED",
+        fromStatus: "PROVISIONING",
+        toStatus: "ACTIVE",
+        reason: "Valid accreditation",
+      },
+    ];
+    (mockOrgService as any).getOrganizationReviewLogs = vi.fn().mockResolvedValueOnce(fakeLogs);
+
+    const { req, res, next } = createMockReqRes({
+      user: { id: "usr_super_admin", email: "super@platform.org", role: "ADMIN" as any },
+      params: { id: "org_123" },
+    });
+
+    await controller.getReviewLogs(req, res, next);
+
+    expect((mockOrgService as any).getOrganizationReviewLogs).toHaveBeenCalledWith(
+      "org_123",
+      expect.objectContaining({ id: "usr_super_admin" })
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: fakeLogs });
+  });
 });

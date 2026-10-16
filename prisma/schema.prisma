@@ -679,12 +679,40 @@ model Tenant {
   usageSnapshots   UsageSnapshot[]
   supportSessions  SupportAccessSession[]
   featureFlagRules FeatureFlagRule[]
+  reviewLogs       TenantReviewLog[]
 
   @@index([status])
   @@index([shardId, status]) // [NEW]
   @@index([type]) // [NEW]
   @@map("tenants")
 }
+
+// ============================================================
+// TENANT REVIEW LOG [Immutable Append-Only Ledger for Compliance]
+// ============================================================
+
+model TenantReviewLog {
+  id         String       @id @default(cuid())
+  tenantId   String
+  tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  reviewerId String       // Super Admin user ID who reviewed
+  action     ReviewAction // APPROVED | REJECTED | SUSPENDED | REACTIVATED
+  fromStatus TenantStatus
+  toStatus   TenantStatus
+  reason     String?      @db.Text
+  createdAt  DateTime     @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("tenant_review_logs")
+}
+
+enum ReviewAction {
+  APPROVED
+  REJECTED
+  SUSPENDED
+  REACTIVATED
+}
+
 
 model Location {
   id       String  @id @default(cuid())

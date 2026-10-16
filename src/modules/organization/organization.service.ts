@@ -1,4 +1,4 @@
-import { TenantType, TenantStatus, Role } from "@prisma/client";
+import { TenantType, TenantStatus, Role, ReviewAction } from "@prisma/client";
 import { OrganizationRepository, CreateOrganizationInput, OrganizationView } from "../../repository/organization.repository";
 import { BrevoEmailService, emailService as defaultEmailService } from "../../service/email.service";
 import { OtpService } from "../../service/otp.service";
@@ -152,6 +152,18 @@ export const createOrganizationService = (deps: OrganizationServiceDeps) => {
       throw new AppError("Failed to approve organization (possible concurrent modification)", 409, "CONCURRENT_UPDATE");
     }
 
+    // Append to immutable audit ledger (Pattern 3: Compliance & Legal Traceability)
+    if (deps.organizationRepo.recordReviewLog) {
+      await deps.organizationRepo.recordReviewLog({
+        tenantId: organizationId,
+        reviewerId: actor.id,
+        action: ReviewAction.APPROVED,
+        fromStatus: TenantStatus.PROVISIONING,
+        toStatus: TenantStatus.ACTIVE,
+        reason: approvalReason,
+      });
+    }
+
     const updatedOrg = await deps.organizationRepo.findById(organizationId);
     if (!updatedOrg) {
       throw new AppError("Organization could not be loaded after approval", 500, "ORGANIZATION_LOAD_FAILED");
@@ -245,6 +257,18 @@ export const createOrganizationService = (deps: OrganizationServiceDeps) => {
 
     if (!transitioned) {
       throw new AppError("Failed to reject organization (possible concurrent modification)", 409, "CONCURRENT_UPDATE");
+    }
+
+    // Append to immutable audit ledger (Pattern 3: Compliance & Legal Traceability)
+    if (deps.organizationRepo.recordReviewLog) {
+      await deps.organizationRepo.recordReviewLog({
+        tenantId: organizationId,
+        reviewerId: actor.id,
+        action: ReviewAction.REJECTED,
+        fromStatus: TenantStatus.PROVISIONING,
+        toStatus: TenantStatus.SUSPENDED,
+        reason: rejectionReason,
+      });
     }
 
     const updatedOrg = await deps.organizationRepo.findById(organizationId);
@@ -348,6 +372,22 @@ export const createOrganizationService = (deps: OrganizationServiceDeps) => {
     return org;
   };
 
+  /**
+   * Retrieves the immutable audit log history for an organization.
+   * Exclusively accessible by Super Administrators and the verified organization creator.
+   */
+  const getOrganizationReviewLogs = async (organizationId: string, actor: AuthUser) => {
+    const isSuper = deps.organizationRepo.isSuperAdmin(actor);
+    if (!isSuper) {
+      const org = await deps.organizationRepo.findVisible(organizationId, actor);
+      if (!org) {
+        throw new AppError("Access denied to organization review history", 403, "FORBIDDEN");
+      }
+    }
+
+    return deps.organizationRepo.getReviewLogs(organizationId);
+  };
+
   return {
     registerOrganization,
     approveOrganization,
@@ -355,6 +395,7 @@ export const createOrganizationService = (deps: OrganizationServiceDeps) => {
     listPendingOrganizations,
     verifyOrganizationEmail,
     getOrganizationById,
+    getOrganizationReviewLogs,
   };
 };
 

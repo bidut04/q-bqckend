@@ -5,6 +5,7 @@ import {
     MemberStatus,
     PlatformRoleType,
     Role,
+    ReviewAction,
     TokenType,
     Prisma,
     type PrismaClient,
@@ -300,6 +301,44 @@ export const createOrganizationRepository = (db: PrismaClient) => {
         }
     };
 
+    /**
+     * Appends an immutable audit log entry for organization review (approval, rejection, suspension, reactivation).
+     */
+    const recordReviewLog = async (
+        data: {
+            tenantId: string;
+            reviewerId: string;
+            action: ReviewAction;
+            fromStatus: TenantStatus;
+            toStatus: TenantStatus;
+            reason?: string | null;
+        },
+        tx?: DbClient,
+    ) => {
+        const client = tx ?? db;
+        return client.tenantReviewLog.create({
+            data: {
+                tenantId: data.tenantId,
+                reviewerId: data.reviewerId,
+                action: data.action,
+                fromStatus: data.fromStatus,
+                toStatus: data.toStatus,
+                reason: data.reason ?? null,
+            },
+        });
+    };
+
+    /**
+     * Retrieves the immutable audit log history for an organization.
+     */
+    const getReviewLogs = async (tenantId: string, tx?: DbClient) => {
+        const client = tx ?? db;
+        return client.tenantReviewLog.findMany({
+            where: { tenantId },
+            orderBy: { createdAt: 'desc' },
+        });
+    };
+
     return {
         scope,
         isSuperAdmin,
@@ -318,6 +357,8 @@ export const createOrganizationRepository = (db: PrismaClient) => {
         countPendingBySubmitter,
         transition,
         setOwnerInvite,
+        recordReviewLog,
+        getReviewLogs,
     };
 };
 

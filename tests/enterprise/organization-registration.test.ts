@@ -1,12 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
-import { TenantType, TenantStatus, Role } from "@prisma/client";
+import { TenantType, TenantStatus, Role, ReviewAction } from "@prisma/client";
 import { createOrganizationRepository } from "../../src/repository/organization.repository";
 import { createOrganizationService } from "../../src/modules/organization/organization.service";
 import { AuthUser } from "../../src/common/types";
 
 describe("Organization Registration by Organization Admin Test Suite", () => {
-  // 1. Mock DB data store for tenants
+  // 1. Mock DB data store for tenants & review logs
   const tenantStore = new Map<string, any>();
+  const reviewLogsStore: any[] = [];
 
   const mockPrisma = {
     tenant: {
@@ -67,6 +68,17 @@ describe("Organization Registration by Organization Admin Test Suite", () => {
     },
     verificationToken: {
       create: vi.fn().mockResolvedValue({}),
+    },
+    tenantReviewLog: {
+      create: vi.fn().mockImplementation(async ({ data }: any) => {
+        const id = `rev_log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const record = { id, createdAt: new Date(), ...data };
+        reviewLogsStore.push(record);
+        return record;
+      }),
+      findMany: vi.fn().mockImplementation(async ({ where }: any) => {
+        return reviewLogsStore.filter((l) => l.tenantId === where.tenantId);
+      }),
     },
   };
 
@@ -326,5 +338,26 @@ describe("Organization Registration by Organization Admin Test Suite", () => {
     const pendingPage = await organizationService.listPendingOrganizations(superAdminActor, { limit: 10 });
     expect(pendingPage).toBeDefined();
     expect(Array.isArray(pendingPage.items)).toBe(true);
+  });
+
+  it("Test 10: Immutable Audit Log captures all review transitions with reviewer ID, action, and notes (Pattern 3)", async () => {
+    const superAdminActor: AuthUser = {
+      id: "usr_super_admin",
+      email: "superadmin@platform.com",
+      role: Role.ADMIN,
+    };
+
+    const createdOrg = Array.from(tenantStore.values())[0];
+    const logs = await organizationService.getOrganizationReviewLogs(createdOrg.id, superAdminActor);
+
+    expect(Array.isArray(logs)).toBe(true);
+    expect(logs.length).toBeGreaterThanOrEqual(1);
+
+    const approvalLog = logs.find((l) => l.action === ReviewAction.APPROVED);
+    expect(approvalLog).toBeDefined();
+    expect(approvalLog?.reviewerId).toBe("usr_super_admin");
+    expect(approvalLog?.fromStatus).toBe(TenantStatus.PROVISIONING);
+    expect(approvalLog?.toStatus).toBe(TenantStatus.ACTIVE);
+    expect(approvalLog?.reason).toContain("All medical council accreditations verified.");
   });
 });

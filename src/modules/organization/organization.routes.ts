@@ -20,6 +20,9 @@ export const createOrganizationRouter = (controller: OrganizationController) => 
   router.post("/:id/approve", requireAuth, requireAdmin, controller.approve);
   router.post("/:id/reject", requireAuth, requireAdmin, controller.reject);
 
+  // Super Admin / Creator: View immutable review audit logs
+  router.get("/:id/review-logs", requireAuth, controller.getReviewLogs);
+
   // Authenticated: view organization profile
   router.get("/:id", requireAuth, controller.getById);
 
