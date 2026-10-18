@@ -86,6 +86,43 @@ export const createQueueController = (deps: {
     }
   };
 
+  const requeueEntry = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const id = req.params.id as string;
+      const { bypassRules, reason } = req.body || {};
+      const result = await deps.queueService.requeueEntry(context, id, {
+        bypassRules: Boolean(bypassRules),
+        reason,
+      });
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const getQueuePolicy = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const queueId = req.params.queueId as string;
+      const result = await deps.queueService.getQueuePolicy(context, queueId);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const updateQueuePolicy = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const queueId = req.params.queueId as string;
+      const result = await deps.queueService.updateQueuePolicy(context, queueId, req.body);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     getActiveByBranch,
     getEntryById,
@@ -94,7 +131,11 @@ export const createQueueController = (deps: {
     completeService,
     markNoShow,
     cancelEntry,
+    requeueEntry,
+    getQueuePolicy,
+    updateQueuePolicy,
   };
 };
 
 export type QueueController = ReturnType<typeof createQueueController>;
+

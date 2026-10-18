@@ -120,8 +120,10 @@ export const updateTenantShard = async (tenantId: string, shardId: string): Prom
 export const invalidateTenantShard = async (tenantId: string): Promise<void> => {
   inMemoryCache.delete(tenantId);
   try {
-    await redis.del(getCacheKey(tenantId));
-    await redis.publish(CACHE_INVALIDATION_CHANNEL, JSON.stringify({ tenantId, timestamp: Date.now() }));
+    if (redis.status === "ready") {
+      await redis.del(getCacheKey(tenantId));
+      await redis.publish(CACHE_INVALIDATION_CHANNEL, JSON.stringify({ tenantId, timestamp: Date.now() }));
+    }
   } catch {
     // Suppress cache error
   }

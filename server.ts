@@ -4,6 +4,7 @@ import http from "http";
 import { app } from "./app";
 import { env } from "./src/config/env";
 import { prisma } from "./src/config/prisma";
+import { socketServer } from "./src/lib/socket/socket.server";
 //import { redisClient } from "./config/redis";
 
 let server: http.Server | undefined;
@@ -39,6 +40,7 @@ const startServer = async (): Promise<void> => {
     // ---------------------------------------------
 
     server = http.createServer(app);
+    socketServer.init(server);
 
     server.listen(
       env.PORT,
@@ -100,6 +102,8 @@ const shutdown = async (): Promise<void> => {
         }
       );
     }
+
+    await socketServer.close();
 
     // Close Redis
     //try {

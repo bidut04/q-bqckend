@@ -76,10 +76,89 @@ export const createBookingRepository = () => {
     });
   };
 
+  const updateStatus = async (
+    context: TenantContext,
+    bookingId: string,
+    status: BookingStatus
+  ) => {
+    const db = await getTenantDb(context);
+    await findById(context, bookingId);
+
+    return db.booking.update({
+      where: { id: bookingId },
+      data: {
+        status,
+        updatedAt: new Date(),
+      },
+    });
+  };
+
+  const checkInAndCreateQueueEntry = async (
+    context: TenantContext,
+    bookingId: string
+  ) => {
+    const db = await getTenantDb(context);
+    const booking = await findById(context, bookingId);
+
+    // Update booking status to ARRIVED
+    const updatedBooking = await db.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.ARRIVED,
+        updatedAt: new Date(),
+      },
+    });
+
+    // Find or create queue for the location and service
+    let queue = await db.queue.findFirst({
+      where: withTenantScope(context, {
+        locationId: booking.locationId,
+        serviceId: booking.serviceId,
+      }),
+    });
+
+    if (!queue) {
+      queue = await db.queue.create({
+        data: {
+          tenantId: context.tenantId,
+          locationId: booking.locationId,
+          serviceId: booking.serviceId,
+          name: `Queue-${booking.locationId.substring(0, 4)}`,
+          code: `Q-${booking.serviceId.substring(0, 6).toUpperCase()}`,
+        },
+      });
+    }
+
+    const tokenNumber = Math.floor(100 + Math.random() * 900);
+    const tokenLabel = `B-${tokenNumber}`;
+
+    const queueEntry = await db.queueEntry.create({
+      data: {
+        tenantId: context.tenantId,
+        locationId: booking.locationId,
+        queueId: queue.id,
+        serviceId: booking.serviceId,
+        customerId: booking.customerId,
+        bookingId: booking.id,
+        tokenNumber,
+        tokenLabel,
+        status: "WAITING",
+        source: "BOOKING",
+      },
+    });
+
+    return {
+      booking: updatedBooking,
+      queueEntry,
+    };
+  };
+
   return {
     findById,
     findByBranch,
     createBooking,
+    updateStatus,
+    checkInAndCreateQueueEntry,
   };
 };
 
@@ -90,7 +169,10 @@ export class BookingRepositoryAdapter {
   findById = this.repo.findById;
   findByBranch = this.repo.findByBranch;
   createBooking = this.repo.createBooking;
+  updateStatus = this.repo.updateStatus;
+  checkInAndCreateQueueEntry = this.repo.checkInAndCreateQueueEntry;
 }
 
 export const BookingRepository = BookingRepositoryAdapter as unknown as typeof BookingRepositoryAdapter &
   typeof createBookingRepository;
+

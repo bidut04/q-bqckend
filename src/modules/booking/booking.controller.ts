@@ -46,11 +46,58 @@ export const createBookingController = (deps: {
     }
   };
 
+  const checkIn = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const id = req.params.id as string;
+      const result = await deps.bookingService.checkInBooking(context, id);
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const cancel = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const id = req.params.id as string;
+      const { reason } = req.body || {};
+      const result = await deps.bookingService.cancelBooking(context, id, reason);
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const complete = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const id = req.params.id as string;
+      const result = await deps.bookingService.completeBooking(context, id);
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     create,
     getById,
     getByBranch,
+    checkIn,
+    cancel,
+    complete,
   };
 };
 
 export type BookingController = ReturnType<typeof createBookingController>;
+

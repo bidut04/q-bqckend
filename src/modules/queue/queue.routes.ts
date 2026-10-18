@@ -11,6 +11,11 @@ export const createQueueRouter = (controller: QueueController) => {
   router.post("/entries/:id/complete", controller.completeService);
   router.post("/entries/:id/no-show", controller.markNoShow);
   router.post("/entries/:id/cancel", controller.cancelEntry);
+  router.post("/entries/:id/requeue", controller.requeueEntry);
+
+  // Queue Policy / Rules configuration
+  router.get("/:queueId/policy", controller.getQueuePolicy);
+  router.put("/:queueId/policy", controller.updateQueuePolicy);
 
   return router;
 };

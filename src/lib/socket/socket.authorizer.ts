@@ -9,11 +9,11 @@ const resolver = new TenantResolver();
 export interface AuthenticatedSocket {
   id: string;
   handshake: {
-    auth: Record<string, any>;
+    auth: Record<string, unknown>;
     headers: Record<string, string | string[] | undefined>;
   };
   join(room: string): void;
-  emit(event: string, ...args: any[]): void;
+  emit(event: string, ...args: unknown[]): void;
   tenantContext?: TenantContext;
 }
 
@@ -25,12 +25,20 @@ export class SocketAuthorizer {
     try {
       const rawAuthHeader = socket.handshake.headers.authorization;
       const authHeaderStr = Array.isArray(rawAuthHeader) ? rawAuthHeader[0] : rawAuthHeader;
-      const token = socket.handshake.auth.token || (authHeaderStr?.startsWith("Bearer ") ? authHeaderStr.substring(7) : authHeaderStr);
+      const token = (socket.handshake.auth.token as string | undefined) || (authHeaderStr?.startsWith("Bearer ") ? authHeaderStr.substring(7) : authHeaderStr);
       if (!token) {
         return next(new Error("Socket authentication token missing"));
       }
 
-      const decoded = verifyJwt(token) as any;
+      const decoded = verifyJwt(token) as {
+        sub?: string;
+        tenantId?: string;
+        roles?: string[];
+        permissions?: string[];
+        branches?: string[];
+        sessionId?: string;
+        securityVersion?: number;
+      } | null;
       if (!decoded || !decoded.tenantId || !decoded.sub) {
         return next(new Error("Invalid socket token claims"));
       }
@@ -41,7 +49,7 @@ export class SocketAuthorizer {
         roles: decoded.roles || [],
         permissions: decoded.permissions || [],
         branches: decoded.branches || [],
-        sessionId: decoded.sessionId,
+        sessionId: decoded.sessionId || "socket_sess",
         securityVersion: decoded.securityVersion || 0,
       });
 
@@ -64,7 +72,7 @@ export class SocketAuthorizer {
     }
 
     const tenantRoomPattern = new RegExp(`^tenant:${context.tenantId}$`);
-    const branchRoomPattern = new RegExp(`^tenant:${context.tenantId}:branch:([a-zA-Z0-9_-]+)$`);
+    const branchRoomPattern = new RegExp(`^tenant:${context.tenantId}:branch:([a-zA-Z0-9_-]+)(?::display)?$`);
 
     if (tenantRoomPattern.test(roomName)) {
       socket.join(roomName);

@@ -45,6 +45,15 @@ export const prisma = new Proxy({} as PrismaClient, {
       "auditLog",
       "media",
       "hero",
+      "platformMember",
+      "tenantMember",
+      "tenant",
+      "shard",
+      "region",
+      "platformSetting",
+      "platformRolePermission",
+      "platformIdempotencyKey",
+      "adminAuditLog",
     ]);
 
     if (catalogEntities.has(prop as string)) {

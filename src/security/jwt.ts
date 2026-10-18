@@ -50,4 +50,5 @@ export function veryfyAccessToken(token: string): AccessTokenPayload {
 }
 export const verifyAccessToken = veryfyAccessToken;
 export const verifyJwt = verifyAccessToken;
+export const generateAccessToken = createAccessToken;
 
