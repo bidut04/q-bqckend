@@ -2,6 +2,7 @@ import { Router } from "express";
 import { container } from "../config/container";
 import { AuthController } from "../controllers/auth.controller";
 import { OtpController } from "../controllers/otp.controller";
+import { requireAuth } from "../middleware/auth.middleware";
 
 export const createAuthRouter = (deps: {
   authController: AuthController;
@@ -13,8 +14,8 @@ export const createAuthRouter = (deps: {
   router.post("/login", deps.authController.login);
   router.post("/refresh", deps.authController.refresh);
   router.post("/logout", deps.authController.logout);
-  router.post("/logout-all", deps.authController.logoutAll);
-  router.post("/change-password", deps.authController.changePassword);
+  router.post("/logout-all", requireAuth, deps.authController.logoutAll);
+  router.post("/change-password", requireAuth, deps.authController.changePassword);
 
   // OTP Routes (Powered by Brevo Email)
   router.post("/send-otp", deps.otpController.sendOtp);

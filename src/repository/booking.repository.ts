@@ -31,10 +31,28 @@ export const createBookingRepository = () => {
     return ensureFound(booking, "Booking");
   };
 
+  const findAll = async (context: TenantContext) => {
+    const db = await getTenantDb(context);
+    return db.booking.findMany({
+      where: withTenantScope(context, {}),
+      include: {
+        location: true,
+        service: true,
+        customer: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  };
+
   const findByBranch = async (context: TenantContext, branchId: string) => {
     const db = await getTenantDb(context);
     return db.booking.findMany({
       where: withTenantScope(context, { locationId: branchId }),
+      include: {
+        location: true,
+        service: true,
+        customer: true,
+      },
       orderBy: { createdAt: "desc" },
     });
   };
@@ -155,6 +173,7 @@ export const createBookingRepository = () => {
 
   return {
     findById,
+    findAll,
     findByBranch,
     createBooking,
     updateStatus,
@@ -167,6 +186,7 @@ export type BookingRepository = ReturnType<typeof createBookingRepository>;
 export class BookingRepositoryAdapter {
   private repo = createBookingRepository();
   findById = this.repo.findById;
+  findAll = this.repo.findAll;
   findByBranch = this.repo.findByBranch;
   createBooking = this.repo.createBooking;
   updateStatus = this.repo.updateStatus;

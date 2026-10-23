@@ -1,13 +1,17 @@
 import http from "http";
 import { Server, Socket } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
 import { env } from "../../config/env";
+import { redisClient } from "../../config/redis";
 import { SocketAuthorizer, AuthenticatedSocket } from "./socket.authorizer";
 import { realtimeCacheService } from "../redis/realtime-cache.service";
 
 export class SocketServer {
   private io: Server | null = null;
+  private pubClient: typeof redisClient | null = null;
+  private subClient: typeof redisClient | null = null;
 
-  public init(httpServer: http.Server): Server {
+  public async init(httpServer: http.Server): Promise<Server> {
     if (this.io) {
       return this.io;
     }
@@ -25,6 +29,39 @@ export class SocketServer {
       pingTimeout: 30000,
       pingInterval: 25000,
     });
+
+    // Wire Redis Adapter for multi-node horizontal scalability if Redis is online
+    if (redisClient.status === "ready") {
+      try {
+        const pub = redisClient.duplicate({ maxRetriesPerRequest: null });
+        const sub = redisClient.duplicate({ maxRetriesPerRequest: null });
+
+        pub.on("error", (err) => {
+          console.warn("⚠️ Socket.IO Redis pubClient error:", err.message);
+        });
+        sub.on("error", (err) => {
+          console.warn("⚠️ Socket.IO Redis subClient error:", err.message);
+        });
+
+        await Promise.all([pub.connect().catch(() => {}), sub.connect().catch(() => {})]);
+
+        if (pub.status === "ready" && sub.status === "ready") {
+          this.pubClient = pub;
+          this.subClient = sub;
+          this.io.adapter(createAdapter(this.pubClient, this.subClient));
+          console.log("✅ Socket.IO Redis Adapter active (Clustered Pub/Sub enabled)");
+        } else {
+          try { pub.disconnect(); } catch {}
+          try { sub.disconnect(); } catch {}
+          console.log("ℹ️ Socket.IO running in standalone mode (In-Memory Adapter)");
+        }
+      } catch (adapterError) {
+        console.warn("⚠️ Socket.IO Redis Adapter fallback to memory:", (adapterError as Error).message);
+        console.log("ℹ️ Socket.IO running in standalone mode (In-Memory Adapter)");
+      }
+    } else {
+      console.log("ℹ️ Socket.IO running in standalone mode (In-Memory Adapter)");
+    }
 
     // 1. Authenticate connection with JWT handshake
     this.io.use((socket: Socket, next) => {
@@ -90,8 +127,16 @@ export class SocketServer {
         this.io!.close(() => resolve());
       });
       this.io = null;
-      console.log("✅ Socket.IO Server closed");
     }
+    if (this.pubClient) {
+      await this.pubClient.quit().catch(() => {});
+      this.pubClient = null;
+    }
+    if (this.subClient) {
+      await this.subClient.quit().catch(() => {});
+      this.subClient = null;
+    }
+    console.log("✅ Socket.IO Server and Redis Adapter closed cleanly");
   }
 }
 

@@ -57,7 +57,13 @@ export const createPlatformService = (deps: PlatformServiceDeps) => {
       })(),
       (async () => {
         try {
-          const res = await redis.ping();
+          if (redis.status !== "ready") {
+            return HealthState.DEGRADED;
+          }
+          const res = await Promise.race([
+            redis.ping(),
+            new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout")), 800)),
+          ]);
           return res === "PONG" ? HealthState.HEALTHY : HealthState.DEGRADED;
         } catch {
           return HealthState.DOWN;
@@ -328,8 +334,15 @@ export const createPlatformService = (deps: PlatformServiceDeps) => {
     let redisLatency = 0;
     let redisOk = true;
     try {
-      await redis.ping();
-      redisLatency = Date.now() - start;
+      if (redis.status !== "ready") {
+        redisOk = false;
+      } else {
+        await Promise.race([
+          redis.ping(),
+          new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout")), 800)),
+        ]);
+        redisLatency = Date.now() - start;
+      }
     } catch {
       redisOk = false;
     }

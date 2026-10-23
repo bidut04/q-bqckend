@@ -6,8 +6,13 @@ import { requireAdmin } from "../../middleware/admin.middleware";
 export const createOrganizationRouter = (controller: OrganizationController) => {
   const router = Router();
 
+  // Public: Portal list of active organizations
+  router.get("/", controller.listPublic);
+  router.get("/:id/services", controller.listTenantServices);
+  router.get("/:id/branches", controller.listTenantBranches);
+  router.post("/:id/book-token", controller.bookPublicToken);
+
   // Public / Semi-public: organization admin registers a new organization
-  router.post("/", controller.register);
   router.post("/register", controller.register);
 
   // Verify OTP sent to organization email (optional verification)

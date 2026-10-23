@@ -5,7 +5,7 @@ import { app } from "./app";
 import { env } from "./src/config/env";
 import { prisma } from "./src/config/prisma";
 import { socketServer } from "./src/lib/socket/socket.server";
-//import { redisClient } from "./config/redis";
+import { redisClient } from "./src/config/redis";
 
 let server: http.Server | undefined;
 
@@ -25,22 +25,27 @@ const startServer = async (): Promise<void> => {
       "✅ MySQL connected"
     );
 
-    // ---------------------------------------------
-    // Redis connection
-    // ---------------------------------------------
+    try {
+      await Promise.race([
+        redisClient.connect(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Redis connection timeout")), 1500)),
+      ]);
+    } catch {
+      // Handled by redisClient error listener
+    }
 
-    //await redisClient.ping();
-
-    console.log(
-      "✅ Redis connected"
-    );
+    if (redisClient.status === "ready") {
+      console.log("✅ Redis connected");
+    } else {
+      console.log("ℹ️ Redis offline - running with in-memory caching and local socket adapter");
+    }
 
     // ---------------------------------------------
     // HTTP server
     // ---------------------------------------------
 
     server = http.createServer(app);
-    socketServer.init(server);
+    await socketServer.init(server);
 
     server.listen(
       env.PORT,
@@ -106,11 +111,13 @@ const shutdown = async (): Promise<void> => {
     await socketServer.close();
 
     // Close Redis
-    //try {
-    //  await redisClient.quit();
-    //} catch {
-    //  redisClient.disconnect();
-    //}
+    if (redisClient.status === "ready") {
+      try {
+        await redisClient.quit();
+      } catch {
+        redisClient.disconnect();
+      }
+    }
 
     // Close MySQL
     await prisma.$disconnect();

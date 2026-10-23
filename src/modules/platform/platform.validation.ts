@@ -48,7 +48,43 @@ export const createOrganizationSchema = z.object({
   type: z.nativeEnum(TenantType),
   contactEmail: z.string().trim().email("Invalid contact email"),
   contactPhone: z.string().trim().max(25).optional(),
-  country: z.string().trim().length(2, "Country code must be 2 characters (ISO-3166-1 alpha-2)").optional(),
+  country: z
+    .string()
+    .trim()
+    .optional()
+    .transform((val) => {
+      if (!val) return undefined;
+      const clean = val.trim();
+      if (!clean) return undefined;
+      const map: Record<string, string> = {
+        'united states': 'US',
+        'usa': 'US',
+        'us': 'US',
+        'india': 'IN',
+        'in': 'IN',
+        'canada': 'CA',
+        'ca': 'CA',
+        'united kingdom': 'GB',
+        'uk': 'GB',
+        'gb': 'GB',
+        'germany': 'DE',
+        'de': 'DE',
+        'bangladesh': 'BD',
+        'bd': 'BD',
+        'singapore': 'SG',
+        'sg': 'SG',
+        'australia': 'AU',
+        'au': 'AU',
+        'united arab emirates': 'AE',
+        'uae': 'AE',
+        'ae': 'AE',
+      };
+      const mapped = map[clean.toLowerCase()];
+      if (mapped) return mapped;
+      if (clean.length === 2) return clean.toUpperCase();
+      return clean.slice(0, 2).toUpperCase();
+    })
+    .pipe(z.string().length(2, "Country code must be 2 characters (ISO-3166-1 alpha-2)").optional()),
   timezone: z.string().trim().default("Asia/Kolkata"),
   currency: z.string().trim().default("INR"),
 

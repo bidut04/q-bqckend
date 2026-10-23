@@ -55,7 +55,8 @@ export const requirePlatformAuth = async (req: Request, _res: Response, next: Ne
         legacyRole === "PLATFORM_OWNER" ||
         legacyRole === "PLATFORM_ADMIN" ||
         legacyRole === "PLATFORM_SUPPORT" ||
-        legacyRole === "SUPER_ADMIN"
+        legacyRole === "SUPER_ADMIN" ||
+        legacyRole === "ADMIN"
       ) {
         const assignedRole: PlatformRoleType =
           legacyRole === "PLATFORM_SUPPORT"

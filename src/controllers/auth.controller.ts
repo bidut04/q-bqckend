@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { AuthService } from "../service/auth.service";
 import { AppError } from "../../utils/app-error";
+import { checkLoginRateLimit } from "../security/rate-limit";
 
 import { AuthenticatedUser } from "../types/express";
 
@@ -71,8 +72,11 @@ export const createAuthController = (authService: AuthService) => {
         throw new AppError("Email and password are required", 400, "VALIDATION_ERROR");
       }
 
-      const ipAddress = req.ip;
+      const ipAddress = req.ip || req.socket.remoteAddress || "127.0.0.1";
       const userAgent = req.headers["user-agent"];
+
+      // Rate limit check: prevents credential stuffing and brute force
+      await checkLoginRateLimit(ipAddress, email.trim().toLowerCase());
 
       const result = await authService.login({
         email,
@@ -99,6 +103,7 @@ export const createAuthController = (authService: AuthService) => {
         requiresMfa: false,
         accessToken: result.accessToken,
         expiresIn: result.expiresIn,
+        user: result.user,
       });
     } catch (error) {
       next(error);
@@ -156,7 +161,7 @@ export const createAuthController = (authService: AuthService) => {
 
   const logoutAll = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const userId = req.user?.id || req.body?.userId;
+      const userId = req.user?.id;
 
       if (!userId) {
         throw new AppError("User authentication required", 401, "UNAUTHORIZED");
@@ -176,7 +181,7 @@ export const createAuthController = (authService: AuthService) => {
 
   const changePassword = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const userId = req.user?.id || req.body?.userId;
+      const userId = req.user?.id;
       const { currentPassword, newPassword } = req.body;
 
       if (!userId) {

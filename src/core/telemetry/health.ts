@@ -12,8 +12,15 @@ export const readinessHandler = async (_req: Request, res: Response): Promise<vo
 
   // 1. Check Redis
   try {
-    const pong = await redis.ping();
-    checks.redis = pong === "PONG" ? "HEALTHY" : "DEGRADED";
+    if (redis.status !== "ready") {
+      checks.redis = "DEGRADED (offline)";
+    } else {
+      const pong = await Promise.race([
+        redis.ping(),
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout")), 800)),
+      ]);
+      checks.redis = pong === "PONG" ? "HEALTHY" : "DEGRADED";
+    }
   } catch (error) {
     checks.redis = `UNHEALTHY: ${(error as Error).message}`;
     isReady = false;

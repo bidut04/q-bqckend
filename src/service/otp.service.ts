@@ -115,7 +115,10 @@ export class OtpService {
       expiryMinutes: Math.floor(this.OTP_TTL_SECONDS / 60),
     });
 
-    const isDevPreview = !process.env.BREVO_API_KEY || process.env.BREVO_API_KEY.trim() === "";
+    const isDevPreview =
+      process.env.NODE_ENV !== "production" &&
+      process.env.ALLOW_DEV_OTP_PREVIEW === "true" &&
+      (!process.env.BREVO_API_KEY || process.env.BREVO_API_KEY.trim() === "");
 
     return {
       success: true,

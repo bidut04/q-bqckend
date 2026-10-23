@@ -133,9 +133,127 @@ async function seed() {
         status: MemberStatus.ACTIVE,
       },
     });
-    console.log("✅ Tenant & TenantMember configured.");
+
+    // 5b. Upsert Tenant Admin (tenant.admin@queflow.com)
+    const tAdminUser = await prisma.user.upsert({
+      where: { email: 'tenant.admin@queflow.com' },
+      update: {
+        passwordHash,
+        role: Role.ADMIN,
+        isActive: true,
+        isVerified: true,
+      },
+      create: {
+        email: 'tenant.admin@queflow.com',
+        passwordHash,
+        role: Role.ADMIN,
+        isActive: true,
+        isVerified: true,
+      },
+    });
+
+    await prisma.tenantMember.upsert({
+      where: {
+        tenantId_userId: {
+          tenantId: tenant.id,
+          userId: tAdminUser.id,
+        },
+      },
+      update: {
+        adminRole: TenantAdminRole.TENANT_ADMIN,
+        status: MemberStatus.ACTIVE,
+      },
+      create: {
+        tenantId: tenant.id,
+        userId: tAdminUser.id,
+        adminRole: TenantAdminRole.TENANT_ADMIN,
+        status: MemberStatus.ACTIVE,
+      },
+    });
+
+    // 5c. Upsert Staff User (staff.counter3@queflow.com)
+    const staffPasswordHash = await bcrypt.hash('staff12345', 10);
+    await prisma.user.upsert({
+      where: { email: 'staff.counter3@queflow.com' },
+      update: {
+        passwordHash: staffPasswordHash,
+        role: Role.USER,
+        isActive: true,
+        isVerified: true,
+      },
+      create: {
+        email: 'staff.counter3@queflow.com',
+        passwordHash: staffPasswordHash,
+        role: Role.USER,
+        isActive: true,
+        isVerified: true,
+      },
+    });
+
+    console.log("✅ Tenant & TenantMember configured (Super Admin, Tenant Admin, Staff).");
+    // 6. Ensure Subscription Plans exist in catalog
+    console.log("💳 Seeding Tiered Subscription Plans (Free, Starter, Professional, Enterprise)...");
+    const plansToSeed = [
+      {
+        code: "free",
+        name: "Free",
+        priceMonthly: 0,
+        currency: "USD",
+        limits: { maxBranches: 1, maxUsers: 2, maxMonthlyBookings: 100, features: ["Single Branch Queue", "Basic Dispenser", "Community Support"] },
+      },
+      {
+        code: "starter",
+        name: "Starter",
+        priceMonthly: 49,
+        currency: "USD",
+        limits: { maxBranches: 3, maxUsers: 10, maxMonthlyBookings: 1000, features: ["Real-time Dashboard", "Basic Analytics", "Email Alerts"] },
+      },
+      {
+        code: "standard",
+        name: "Professional",
+        priceMonthly: 149,
+        currency: "USD",
+        limits: { maxBranches: 10, maxUsers: 50, maxMonthlyBookings: 10000, features: ["All Starter Features", "SMS Alerts", "Multi-department Routing", "Audit Logging"] },
+      },
+      {
+        code: "professional",
+        name: "Professional",
+        priceMonthly: 149,
+        currency: "USD",
+        limits: { maxBranches: 10, maxUsers: 50, maxMonthlyBookings: 10000, features: ["All Starter Features", "SMS Alerts", "Multi-department Routing", "Audit Logging"] },
+      },
+      {
+        code: "enterprise",
+        name: "Enterprise",
+        priceMonthly: 499,
+        currency: "USD",
+        limits: { maxBranches: 999, maxUsers: 999, maxMonthlyBookings: 999999, features: ["Dedicated Database Shard", "Custom SLA (99.99%)", "24/7 Dedicated Support", "Custom Integrations"] },
+      },
+    ];
+
+    for (const p of plansToSeed) {
+      await prisma.plan.upsert({
+        where: { code: p.code },
+        update: {
+          name: p.name,
+          priceMonthly: p.priceMonthly,
+          currency: p.currency,
+          limits: p.limits,
+          isActive: true,
+        },
+        create: {
+          code: p.code,
+          name: p.name,
+          priceMonthly: p.priceMonthly,
+          currency: p.currency,
+          limits: p.limits,
+          isActive: true,
+        },
+      });
+    }
+    console.log("✅ Subscription Plans seeded.");
   } catch (err: any) {
-    console.warn("⚠️ Tenant note:", err.message);
+    console.warn("⚠️ Tenant / Plan note:", err.message);
   }
 
   console.log("\n=======================================================");

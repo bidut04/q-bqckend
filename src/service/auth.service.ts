@@ -213,10 +213,30 @@ export const createAuthService = (deps: AuthServiceDeps) => {
     await deps.userRepository.updateLastLogin(user.id);
     await deps.securityCache.setSecurityVersion(user.id, user.securityVersion);
 
+    const authorities = await deps.userRepository.getUserAuthorities(user.id);
+    const isPlatformSuperAdmin = authorities?.platformMember?.status === "ACTIVE";
+    const tenantMemberships = authorities?.tenantMemberships || [];
+    const isTenantAdmin = tenantMemberships.some(
+      (m: any) => m.adminRole === "TENANT_OWNER" || m.adminRole === "TENANT_ADMIN"
+    );
+
+    let userType: "PLATFORM_SUPER_ADMIN" | "TENANT_ADMIN" | "USER" = "USER";
+    if (isPlatformSuperAdmin) {
+      userType = "PLATFORM_SUPER_ADMIN";
+    } else if (isTenantAdmin) {
+      userType = "TENANT_ADMIN";
+    }
+
+    const effectiveRole = isPlatformSuperAdmin
+      ? (authorities?.platformMember?.role || "PLATFORM_OWNER")
+      : isTenantAdmin
+      ? "TENANT_ADMIN"
+      : user.role;
+
     const accessToken = createAccessToken({
       sub: user.id,
       sid: sessionId,
-      role: user.role,
+      role: effectiveRole,
       securityVersion: user.securityVersion,
     });
 
@@ -225,7 +245,7 @@ export const createAuthService = (deps: AuthServiceDeps) => {
       action: AuditAction.LOGIN_SUCCESS,
       ipAddress: input.ipAddress,
       userAgent: input.userAgent,
-      details: { sessionId },
+      details: { sessionId, userType },
     });
 
     return {
@@ -233,6 +253,19 @@ export const createAuthService = (deps: AuthServiceDeps) => {
       accessToken,
       refreshToken,
       expiresIn: 600,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: effectiveRole,
+        userType,
+        isSuperAdmin: isPlatformSuperAdmin,
+        tenants: tenantMemberships.map((m: any) => ({
+          tenantId: m.tenantId,
+          adminRole: m.adminRole,
+          name: m.tenant?.name,
+          slug: m.tenant?.slug,
+        })),
+      },
     };
   };
 

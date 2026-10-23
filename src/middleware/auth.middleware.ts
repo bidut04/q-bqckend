@@ -2,12 +2,13 @@ import { Request, Response, NextFunction } from "express";
 import { Role } from "@prisma/client";
 import { verifyAccessToken } from "../security/jwt";
 import { UnauthorizedError } from "../lib/errors";
+import { redisSecurityCache } from "../service/redis.service";
 
-export const requireAuth = (
+export const requireAuth = async (
     req: Request,
     _res: Response,
     next: NextFunction
-): void => {
+): Promise<void> => {
     try {
         const authHeader = req.headers.authorization;
         let token: string | undefined;
@@ -23,6 +24,15 @@ export const requireAuth = (
         }
 
         const payload = verifyAccessToken(token);
+
+        // Security check: verify securityVersion against Redis cache if available
+        // Immediately invalidates access tokens if password was changed or logout-all occurred
+        if (payload.securityVersion !== undefined) {
+            const currentVersion = await redisSecurityCache.getSecurityVersion(payload.sub);
+            if (currentVersion !== null && currentVersion > payload.securityVersion) {
+                throw new UnauthorizedError("Session has been revoked. Please log in again.");
+            }
+        }
 
         req.user = {
             id: payload.sub,

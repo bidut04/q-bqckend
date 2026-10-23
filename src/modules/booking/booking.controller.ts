@@ -33,6 +33,19 @@ export const createBookingController = (deps: {
     }
   };
 
+  const getAll = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const result = await deps.bookingRepository.findAll(context);
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   const getByBranch = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const context = getTenantContextFromRequest(req);
@@ -91,6 +104,7 @@ export const createBookingController = (deps: {
 
   return {
     create,
+    getAll,
     getById,
     getByBranch,
     checkIn,

@@ -81,6 +81,42 @@ export const createUserRepository = (prisma: PrismaClient) => {
         });
     };
 
+    const getUserAuthorities = async (userId: string) => {
+        try {
+            return await prisma.user.findUnique({
+                where: { id: userId },
+                select: {
+                    id: true,
+                    email: true,
+                    role: true,
+                    platformMember: {
+                        select: {
+                            role: true,
+                            status: true,
+                        },
+                    },
+                    tenantMemberships: {
+                        where: { status: "ACTIVE" },
+                        select: {
+                            tenantId: true,
+                            adminRole: true,
+                            tenant: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    slug: true,
+                                    status: true,
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+        } catch {
+            return null;
+        }
+    };
+
     return {
         findById,
         findByEmail,
@@ -91,6 +127,7 @@ export const createUserRepository = (prisma: PrismaClient) => {
         lockAccount,
         incrementSecurityVersion,
         updatePassword,
+        getUserAuthorities,
     };
 };
 

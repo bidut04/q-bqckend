@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import { prisma } from "../../config/prisma";
 import { OrganizationService } from "./organization.service";
 import { OrganizationRepository } from "../../repository/organization.repository";
 import { AuthUser } from "../../common/types";
@@ -163,6 +164,165 @@ export const createOrganizationController = (deps: {
     }
   };
 
+  const listPublic = async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const list = await prisma.tenant.findMany({
+        where: {
+          status: "ACTIVE",
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          name: true,
+          legalName: true,
+          slug: true,
+          type: true,
+          email: true,
+          phone: true,
+          country: true,
+          timezone: true,
+          status: true,
+          _count: {
+            select: {
+              locations: true,
+              services: true,
+            },
+          },
+        },
+        orderBy: { name: "asc" },
+      });
+      res.status(200).json({
+        success: true,
+        data: list,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const listTenantServices = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const tenantId = req.params.id as string;
+      const services = await prisma.service.findMany({
+        where: {
+          tenantId,
+          status: "ACTIVE",
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          name: true,
+          code: true,
+          description: true,
+          status: true,
+          estimatedDurationSec: true,
+          tenantId: true,
+        },
+        orderBy: { name: "asc" },
+      });
+      res.status(200).json({
+        success: true,
+        data: services,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const listTenantBranches = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const tenantId = req.params.id as string;
+      const branches = await prisma.location.findMany({
+        where: {
+          tenantId,
+          status: "ACTIVE",
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          name: true,
+          code: true,
+          address: true,
+          phone: true,
+          status: true,
+          tenantId: true,
+          _count: {
+            select: {
+              counters: true,
+              services: true,
+            },
+          },
+        },
+        orderBy: { name: "asc" },
+      });
+      res.status(200).json({
+        success: true,
+        data: branches,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const bookPublicToken = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const tenantId = req.params.id as string;
+      const { branchId, serviceId, timeSlot, customerName, customerPhone } = req.body;
+
+      let queue = await prisma.queue.findFirst({
+        where: { locationId: branchId, serviceId },
+      });
+
+      if (!queue) {
+        queue = await prisma.queue.findFirst({
+          where: { locationId: branchId },
+        });
+      }
+
+      const nextTokenNum = (queue?.lastTokenNumber ?? 20) + 1;
+      const prefix = queue?.tokenPrefix || "K0";
+      const tokenStr = `${prefix}${String(nextTokenNum).padStart(2, "0")}`;
+
+      if (queue) {
+        await prisma.queue.update({
+          where: { id: queue.id },
+          data: { lastTokenNumber: nextTokenNum },
+        });
+      }
+
+      const queueEntry = await prisma.queueEntry.create({
+        data: {
+          tenantId,
+          locationId: branchId,
+          queueId: queue?.id || "default-queue",
+          tokenNumber: nextTokenNum,
+          tokenLabel: tokenStr,
+          status: "WAITING",
+          customerName: customerName || req.user?.email || "Valued Customer",
+          customerPhone: customerPhone || undefined,
+          metadata: { timeSlot: timeSlot || "Now", bookedVia: "QueuePortal" },
+        },
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: queueEntry.id,
+          tokenNumber: tokenStr,
+          tokenLabel: tokenStr,
+          status: queueEntry.status,
+          queueId: queueEntry.queueId,
+          locationId: branchId,
+          serviceId,
+          timeSlot: timeSlot || "Now",
+          createdAt: queueEntry.createdAt,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     register,
     verifyOtp,
@@ -171,6 +331,10 @@ export const createOrganizationController = (deps: {
     listPending,
     getById,
     getReviewLogs,
+    listPublic,
+    listTenantServices,
+    listTenantBranches,
+    bookPublicToken,
   };
 };
 
