@@ -264,18 +264,64 @@ export const createOrganizationController = (deps: {
     }
   };
 
+  const sanitizeText = (val: unknown, maxLen = 60): string => {
+    if (typeof val !== "string") return "";
+    return val
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+      .replace(/<[^>]+>/g, "")
+      .trim()
+      .slice(0, maxLen);
+  };
+
   const bookPublicToken = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const tenantId = req.params.id as string;
       const { branchId, serviceId, timeSlot, customerName, customerPhone } = req.body;
 
+      if (!branchId) {
+        res.status(400).json({ success: false, message: "branchId is required" });
+        return;
+      }
+
+      // 1. Verify tenant exists and is active
+      const tenant = await prisma.tenant.findFirst({
+        where: { id: tenantId, status: "ACTIVE", deletedAt: null },
+      });
+      if (!tenant) {
+        res.status(404).json({ success: false, message: "Organization not found or inactive" });
+        return;
+      }
+
+      // 2. Verify branch belongs to this tenant and is active (prevents cross-tenant IDOR)
+      const branch = await prisma.location.findFirst({
+        where: { id: branchId, tenantId, status: "ACTIVE", deletedAt: null },
+      });
+      if (!branch) {
+        res.status(400).json({ success: false, message: "Invalid branch for this organization" });
+        return;
+      }
+
+      // 3. Verify service belongs to this tenant if provided
       let resolvedServiceId = serviceId;
-      if (!resolvedServiceId) {
+      if (resolvedServiceId) {
+        const service = await prisma.service.findFirst({
+          where: { id: resolvedServiceId, tenantId, status: "ACTIVE", deletedAt: null },
+        });
+        if (!service) {
+          res.status(400).json({ success: false, message: "Invalid service for this organization" });
+          return;
+        }
+      } else {
         const firstService = await prisma.service.findFirst({
-          where: { tenantId },
+          where: { tenantId, status: "ACTIVE", deletedAt: null },
         });
         resolvedServiceId = firstService?.id || "";
       }
+
+      // 4. Sanitize inputs to prevent Stored XSS
+      const cleanCustomerName = sanitizeText(customerName, 60) || (req as any).user?.email || "Valued Customer";
+      const cleanCustomerPhone = customerPhone ? sanitizeText(customerPhone, 20) : undefined;
+      const cleanTimeSlot = sanitizeText(timeSlot, 30) || "Now";
 
       let queue = await prisma.queue.findFirst({
         where: { locationId: branchId, ...(resolvedServiceId ? { serviceId: resolvedServiceId } : {}) },
@@ -321,9 +367,9 @@ export const createOrganizationController = (deps: {
           status: "WAITING",
           source: "ONLINE",
           metadata: {
-            customerName: customerName || (req as any).user?.email || "Valued Customer",
-            customerPhone: customerPhone || undefined,
-            timeSlot: timeSlot || "Now",
+            customerName: cleanCustomerName,
+            customerPhone: cleanCustomerPhone,
+            timeSlot: cleanTimeSlot,
             bookedVia: "QueuePortal",
           },
         },
@@ -338,8 +384,8 @@ export const createOrganizationController = (deps: {
           status: queueEntry.status,
           queueId: queueEntry.queueId,
           locationId: branchId,
-          serviceId,
-          timeSlot: timeSlot || "Now",
+          serviceId: resolvedServiceId,
+          timeSlot: cleanTimeSlot,
           createdAt: queueEntry.createdAt,
         },
       });

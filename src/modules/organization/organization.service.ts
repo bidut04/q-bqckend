@@ -94,12 +94,16 @@ export const createOrganizationService = (deps: OrganizationServiceDeps) => {
       previewOtp = (otpRes as any).previewOtp;
     }
 
+    const allowPreview =
+      (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") &&
+      Boolean(previewOtp);
+
     return {
       organization,
       mailSent: emailResult.success,
       adminEmail,
       message: `Organization created. Confirmation email sent to admin at ${adminEmail}.`,
-      ...(otpSent ? { otpSent, previewOtp } : {}),
+      ...(otpSent ? { otpSent, ...(allowPreview ? { previewOtp } : {}) } : {}),
     };
   };
 

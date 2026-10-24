@@ -13,12 +13,12 @@ export async function tenantShardingMiddleware(
   next: NextFunction
 ): Promise<void> {
   const user = req.user;
-  if (!user || !user.tenantId) {
+  const tenantId = user?.tenantId || req.tenantId;
+  if (!tenantId) {
     return next();
   }
 
   try {
-    const tenantId = user.tenantId;
     const shardId = await ShardRouter.resolveShard(tenantId);
 
     req.tenantId = tenantId;
@@ -29,7 +29,7 @@ export async function tenantShardingMiddleware(
       {
         tenantId,
         shardId,
-        userId: user.id || user.sub || user.email || "anonymous",
+        userId: user?.id || (user as any)?.sub || user?.email || "anonymous",
       },
       () => {
         next();

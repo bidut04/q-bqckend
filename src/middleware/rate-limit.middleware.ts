@@ -24,3 +24,16 @@ export const authRateLimiter = rateLimit({
     message: "Too many authentication attempts. Please try again later.",
   },
 });
+
+export const publicBookingRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === "test",
+  message: {
+    success: false,
+    code: "BOOKING_RATE_LIMITED",
+    message: "Too many booking requests from this IP. Please try again later.",
+  },
+});

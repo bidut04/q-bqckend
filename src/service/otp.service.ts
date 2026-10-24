@@ -116,7 +116,7 @@ export class OtpService {
     });
 
     const isDevPreview =
-      process.env.NODE_ENV !== "production" &&
+      (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") &&
       process.env.ALLOW_DEV_OTP_PREVIEW === "true" &&
       (!process.env.BREVO_API_KEY || process.env.BREVO_API_KEY.trim() === "");
 

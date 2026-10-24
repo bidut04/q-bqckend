@@ -11,6 +11,7 @@ import { createRoleRouter } from "../modules/role/role.routes";
 import { container } from "../config/container";
 import { requireAuth } from "../middleware/auth.middleware";
 import { requireAdmin } from "../middleware/admin.middleware";
+import { tenantShardingMiddleware } from "../middleware/tenant.middleware";
 
 export const apiRouter = Router();
 
@@ -26,12 +27,12 @@ apiRouter.use("/organizations", createOrganizationRouter(container.controllers.o
 // Protected routes: requires Authentication (requireAuth) & Authorization (requireAdmin)
 apiRouter.use("/media", requireAuth, requireAdmin, mediaRouter);
 
-// Module routes (Protected: requireAuth)
-apiRouter.use("/bookings", requireAuth, createBookingRouter(container.controllers.booking));
-apiRouter.use("/queue", requireAuth, createQueueRouter(container.controllers.queue));
-apiRouter.use("/forms", requireAuth, createFormRouter(container.controllers.form));
-apiRouter.use("/employees", requireAuth, createEmployeeRouter(container.controllers.employee));
-apiRouter.use("/roles", requireAuth, createRoleRouter(container.controllers.role));
+// Module routes (Protected: requireAuth & tenantShardingMiddleware)
+apiRouter.use("/bookings", requireAuth, tenantShardingMiddleware, createBookingRouter(container.controllers.booking));
+apiRouter.use("/queue", requireAuth, tenantShardingMiddleware, createQueueRouter(container.controllers.queue));
+apiRouter.use("/forms", requireAuth, tenantShardingMiddleware, createFormRouter(container.controllers.form));
+apiRouter.use("/employees", requireAuth, tenantShardingMiddleware, createEmployeeRouter(container.controllers.employee));
+apiRouter.use("/roles", requireAuth, tenantShardingMiddleware, createRoleRouter(container.controllers.role));
 
 export default apiRouter;
 

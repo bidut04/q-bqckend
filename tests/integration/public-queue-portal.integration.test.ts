@@ -7,9 +7,11 @@ vi.mock("../../src/config/prisma", () => ({
   prisma: {
     tenant: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     location: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     service: {
       findFirst: vi.fn(),
@@ -149,6 +151,26 @@ describe("Public Queue Portal Integration Test Suite", () => {
   });
 
   describe("POST /api/organizations/:id/book-token", () => {
+    beforeEach(() => {
+      (prisma.tenant.findFirst as any).mockResolvedValue({
+        id: "tenant-sbi",
+        name: "State Bank of India",
+        status: "ACTIVE",
+      });
+      (prisma.location.findFirst as any).mockResolvedValue({
+        id: "branch-01",
+        tenantId: "tenant-sbi",
+        name: "Connaught Place Branch",
+        status: "ACTIVE",
+      });
+      (prisma.service.findFirst as any).mockResolvedValue({
+        id: "srv-01",
+        tenantId: "tenant-sbi",
+        name: "General Banking",
+        status: "ACTIVE",
+      });
+    });
+
     it("should atomically book a public queue slot and return token number", async () => {
       const mockQueue = {
         id: "queue-101",
@@ -230,6 +252,11 @@ describe("Public Queue Portal Integration Test Suite", () => {
     });
 
     it("should provision queue automatically if branch has no pre-existing queue", async () => {
+      (prisma.location.findFirst as any).mockResolvedValueOnce({
+        id: "branch-new",
+        tenantId: "tenant-sbi",
+        status: "ACTIVE",
+      });
       (prisma.queue.findFirst as any).mockResolvedValue(null);
 
       const mockNewQueue = {
@@ -281,6 +308,65 @@ describe("Public Queue Portal Integration Test Suite", () => {
           }),
         })
       );
+    });
+
+    it("should strictly reject cross-tenant IDOR attack when branch belongs to another tenant", async () => {
+      (prisma.location.findFirst as any).mockResolvedValueOnce(null);
+
+      const { req, res, next } = createMockReqRes({
+        params: { id: "tenant-sbi" },
+        body: {
+          branchId: "branch-foreign-hdfc",
+          serviceId: "srv-01",
+        },
+      });
+
+      await controller.bookPublicToken(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          message: "Invalid branch for this organization",
+        })
+      );
+    });
+
+    it("should sanitize malicious script tags to prevent Stored XSS in customer metadata", async () => {
+      const mockQueue = {
+        id: "queue-101",
+        locationId: "branch-01",
+        serviceId: "srv-01",
+        lastTokenNumber: 30,
+        tokenPrefix: "SB",
+      };
+      (prisma.queue.findFirst as any).mockResolvedValueOnce(mockQueue);
+      (prisma.queue.update as any).mockResolvedValueOnce({ ...mockQueue, lastTokenNumber: 31 });
+      (prisma.queueEntry.create as any).mockResolvedValueOnce({
+        id: "entry-clean-1",
+        status: "WAITING",
+      });
+
+      const { req, res, next } = createMockReqRes({
+        params: { id: "tenant-sbi" },
+        body: {
+          branchId: "branch-01",
+          serviceId: "srv-01",
+          customerName: "<script>alert('pwned')</script>John Doe",
+          customerPhone: "<img src=x onerror=alert(1)>9876543210",
+        },
+      });
+
+      await controller.bookPublicToken(req, res, next);
+
+      expect(prisma.queueEntry.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            customerName: "John Doe",
+            customerPhone: "9876543210",
+          }),
+        }),
+      });
     });
   });
 });
