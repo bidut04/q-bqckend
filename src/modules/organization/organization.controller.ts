@@ -269,13 +269,33 @@ export const createOrganizationController = (deps: {
       const tenantId = req.params.id as string;
       const { branchId, serviceId, timeSlot, customerName, customerPhone } = req.body;
 
+      let resolvedServiceId = serviceId;
+      if (!resolvedServiceId) {
+        const firstService = await prisma.service.findFirst({
+          where: { tenantId },
+        });
+        resolvedServiceId = firstService?.id || "";
+      }
+
       let queue = await prisma.queue.findFirst({
-        where: { locationId: branchId, serviceId },
+        where: { locationId: branchId, ...(resolvedServiceId ? { serviceId: resolvedServiceId } : {}) },
       });
 
       if (!queue) {
         queue = await prisma.queue.findFirst({
           where: { locationId: branchId },
+        });
+      }
+
+      if (!queue && resolvedServiceId) {
+        queue = await prisma.queue.create({
+          data: {
+            tenantId,
+            locationId: branchId,
+            serviceId: resolvedServiceId,
+            name: `Queue-${branchId.substring(0, 6)}`,
+            code: `Q-${branchId.substring(0, 6).toUpperCase()}`,
+          },
         });
       }
 
@@ -295,12 +315,17 @@ export const createOrganizationController = (deps: {
           tenantId,
           locationId: branchId,
           queueId: queue?.id || "default-queue",
+          serviceId: resolvedServiceId || queue?.serviceId || "default-service",
           tokenNumber: nextTokenNum,
           tokenLabel: tokenStr,
           status: "WAITING",
-          customerName: customerName || req.user?.email || "Valued Customer",
-          customerPhone: customerPhone || undefined,
-          metadata: { timeSlot: timeSlot || "Now", bookedVia: "QueuePortal" },
+          source: "ONLINE",
+          metadata: {
+            customerName: customerName || (req as any).user?.email || "Valued Customer",
+            customerPhone: customerPhone || undefined,
+            timeSlot: timeSlot || "Now",
+            bookedVia: "QueuePortal",
+          },
         },
       });
 
