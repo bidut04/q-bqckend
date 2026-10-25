@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { BookingController } from "./booking.controller";
+import { enforceIdempotency } from "../../middleware/idempotency";
 
 export const createBookingRouter = (controller: BookingController) => {
   const router = Router();
 
-  router.post("/", controller.create);
+  router.post("/", enforceIdempotency(), controller.create);
   router.get("/", controller.getAll);
   router.get("/:id", controller.getById);
   router.get("/branch/:branchId", controller.getByBranch);

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import crypto from "crypto";
 import { prisma } from "../../config/prisma";
 import { OrganizationService } from "./organization.service";
 import { OrganizationRepository } from "../../repository/organization.repository";
@@ -264,6 +265,9 @@ export const createOrganizationController = (deps: {
     }
   };
 
+  const publicBookingIdempotencyCache = new Map<string, { status: number; body: any; expiresAt: number }>();
+  const inFlightBookings = new Map<string, Promise<{ status: number; body: any }>>();
+
   const sanitizeText = (val: unknown, maxLen = 60): string => {
     if (typeof val !== "string") return "";
     return val
@@ -283,112 +287,216 @@ export const createOrganizationController = (deps: {
         return;
       }
 
-      // 1. Verify tenant exists and is active
-      const tenant = await prisma.tenant.findFirst({
-        where: { id: tenantId, status: "ACTIVE", deletedAt: null },
-      });
-      if (!tenant) {
-        res.status(404).json({ success: false, message: "Organization not found or inactive" });
-        return;
-      }
+      // Idempotency Key Handling
+      const rawIdempKey =
+        req.headers["idempotency-key"] ||
+        req.headers["x-idempotency-key"] ||
+        req.body?.idempotencyKey;
+      const idempotencyKey = typeof rawIdempKey === "string" ? rawIdempKey.trim() : undefined;
+      const cacheKey = idempotencyKey ? `${tenantId}:${idempotencyKey}` : null;
 
-      // 2. Verify branch belongs to this tenant and is active (prevents cross-tenant IDOR)
-      const branch = await prisma.location.findFirst({
-        where: { id: branchId, tenantId, status: "ACTIVE", deletedAt: null },
-      });
-      if (!branch) {
-        res.status(400).json({ success: false, message: "Invalid branch for this organization" });
-        return;
-      }
-
-      // 3. Verify service belongs to this tenant if provided
-      let resolvedServiceId = serviceId;
-      if (resolvedServiceId) {
-        const service = await prisma.service.findFirst({
-          where: { id: resolvedServiceId, tenantId, status: "ACTIVE", deletedAt: null },
-        });
-        if (!service) {
-          res.status(400).json({ success: false, message: "Invalid service for this organization" });
+      if (cacheKey) {
+        // 1. Check in-memory cache
+        const cached = publicBookingIdempotencyCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+          res.setHeader("X-Cache-Lookup", "HIT-IDEMPOTENT");
+          res.status(cached.status).json(cached.body);
           return;
         }
-      } else {
-        const firstService = await prisma.service.findFirst({
-          where: { tenantId, status: "ACTIVE", deletedAt: null },
-        });
-        resolvedServiceId = firstService?.id || "";
+
+        // 2. Check Database persistence
+        try {
+          const dbKey = await prisma.idempotencyKey.findUnique({
+            where: { tenantId_key: { tenantId, key: idempotencyKey! } },
+          });
+          if (dbKey && dbKey.responseStatus && dbKey.responseBody && dbKey.expiresAt > new Date()) {
+            publicBookingIdempotencyCache.set(cacheKey, {
+              status: dbKey.responseStatus,
+              body: dbKey.responseBody,
+              expiresAt: dbKey.expiresAt.getTime(),
+            });
+            res.setHeader("X-Cache-Lookup", "HIT-IDEMPOTENT");
+            res.status(dbKey.responseStatus).json(dbKey.responseBody);
+            return;
+          }
+        } catch {
+          // Fall through if database idempotency query fails
+        }
+
+        // 3. Handle concurrent in-flight requests (e.g. rapid double-clicks on mobile)
+        if (inFlightBookings.has(cacheKey)) {
+          const inFlightResult = await inFlightBookings.get(cacheKey)!;
+          res.setHeader("X-Cache-Lookup", "HIT-IDEMPOTENT-INFLIGHT");
+          res.status(inFlightResult.status).json(inFlightResult.body);
+          return;
+        }
       }
 
-      // 4. Sanitize inputs to prevent Stored XSS
-      const cleanCustomerName = sanitizeText(customerName, 60) || (req as any).user?.email || "Valued Customer";
-      const cleanCustomerPhone = customerPhone ? sanitizeText(customerPhone, 20) : undefined;
-      const cleanTimeSlot = sanitizeText(timeSlot, 30) || "Now";
-
-      let queue = await prisma.queue.findFirst({
-        where: { locationId: branchId, ...(resolvedServiceId ? { serviceId: resolvedServiceId } : {}) },
-      });
-
-      if (!queue) {
-        queue = await prisma.queue.findFirst({
-          where: { locationId: branchId },
+      // Execute booking creation logic
+      const executeBooking = async (): Promise<{ status: number; body: any }> => {
+        // 1. Verify tenant exists and is active
+        const tenant = await prisma.tenant.findFirst({
+          where: { id: tenantId, status: "ACTIVE", deletedAt: null },
         });
-      }
+        if (!tenant) {
+          return {
+            status: 404,
+            body: { success: false, message: "Organization not found or inactive" },
+          };
+        }
 
-      if (!queue && resolvedServiceId) {
-        queue = await prisma.queue.create({
+        // 2. Verify branch belongs to this tenant and is active (prevents cross-tenant IDOR)
+        const branch = await prisma.location.findFirst({
+          where: { id: branchId, tenantId, status: "ACTIVE", deletedAt: null },
+        });
+        if (!branch) {
+          return {
+            status: 400,
+            body: { success: false, message: "Invalid branch for this organization" },
+          };
+        }
+
+        // 3. Verify service belongs to this tenant if provided
+        let resolvedServiceId = serviceId;
+        if (resolvedServiceId) {
+          const service = await prisma.service.findFirst({
+            where: { id: resolvedServiceId, tenantId, status: "ACTIVE", deletedAt: null },
+          });
+          if (!service) {
+            return {
+              status: 400,
+              body: { success: false, message: "Invalid service for this organization" },
+            };
+          }
+        } else {
+          const firstService = await prisma.service.findFirst({
+            where: { tenantId, status: "ACTIVE", deletedAt: null },
+          });
+          resolvedServiceId = firstService?.id || "";
+        }
+
+        // 4. Sanitize inputs to prevent Stored XSS
+        const cleanCustomerName = sanitizeText(customerName, 60) || (req as any).user?.email || "Valued Customer";
+        const cleanCustomerPhone = customerPhone ? sanitizeText(customerPhone, 20) : undefined;
+        const cleanTimeSlot = sanitizeText(timeSlot, 30) || "Now";
+
+        let queue = await prisma.queue.findFirst({
+          where: { locationId: branchId, ...(resolvedServiceId ? { serviceId: resolvedServiceId } : {}) },
+        });
+
+        if (!queue) {
+          queue = await prisma.queue.findFirst({
+            where: { locationId: branchId },
+          });
+        }
+
+        if (!queue && resolvedServiceId) {
+          queue = await prisma.queue.create({
+            data: {
+              tenantId,
+              locationId: branchId,
+              serviceId: resolvedServiceId,
+              name: `Queue-${branchId.substring(0, 6)}`,
+              code: `Q-${branchId.substring(0, 6).toUpperCase()}`,
+            },
+          });
+        }
+
+        const nextTokenNum = (queue?.lastTokenNumber ?? 20) + 1;
+        const prefix = queue?.tokenPrefix || "K0";
+        const tokenStr = `${prefix}${String(nextTokenNum).padStart(2, "0")}`;
+
+        if (queue) {
+          await prisma.queue.update({
+            where: { id: queue.id },
+            data: { lastTokenNumber: nextTokenNum },
+          });
+        }
+
+        const queueEntry = await prisma.queueEntry.create({
           data: {
             tenantId,
             locationId: branchId,
+            queueId: queue?.id || "default-queue",
+            serviceId: resolvedServiceId || queue?.serviceId || "default-service",
+            tokenNumber: nextTokenNum,
+            tokenLabel: tokenStr,
+            status: "WAITING",
+            source: "ONLINE",
+            metadata: {
+              customerName: cleanCustomerName,
+              customerPhone: cleanCustomerPhone,
+              timeSlot: cleanTimeSlot,
+              bookedVia: "QueuePortal",
+              idempotencyKey,
+            },
+          },
+        });
+
+        const responsePayload = {
+          success: true,
+          data: {
+            id: queueEntry.id,
+            tokenNumber: tokenStr,
+            tokenLabel: tokenStr,
+            status: queueEntry.status,
+            queueId: queueEntry.queueId,
+            locationId: branchId,
             serviceId: resolvedServiceId,
-            name: `Queue-${branchId.substring(0, 6)}`,
-            code: `Q-${branchId.substring(0, 6).toUpperCase()}`,
-          },
-        });
-      }
-
-      const nextTokenNum = (queue?.lastTokenNumber ?? 20) + 1;
-      const prefix = queue?.tokenPrefix || "K0";
-      const tokenStr = `${prefix}${String(nextTokenNum).padStart(2, "0")}`;
-
-      if (queue) {
-        await prisma.queue.update({
-          where: { id: queue.id },
-          data: { lastTokenNumber: nextTokenNum },
-        });
-      }
-
-      const queueEntry = await prisma.queueEntry.create({
-        data: {
-          tenantId,
-          locationId: branchId,
-          queueId: queue?.id || "default-queue",
-          serviceId: resolvedServiceId || queue?.serviceId || "default-service",
-          tokenNumber: nextTokenNum,
-          tokenLabel: tokenStr,
-          status: "WAITING",
-          source: "ONLINE",
-          metadata: {
-            customerName: cleanCustomerName,
-            customerPhone: cleanCustomerPhone,
             timeSlot: cleanTimeSlot,
-            bookedVia: "QueuePortal",
+            createdAt: queueEntry.createdAt,
           },
-        },
-      });
+        };
 
-      res.status(201).json({
-        success: true,
-        data: {
-          id: queueEntry.id,
-          tokenNumber: tokenStr,
-          tokenLabel: tokenStr,
-          status: queueEntry.status,
-          queueId: queueEntry.queueId,
-          locationId: branchId,
-          serviceId: resolvedServiceId,
-          timeSlot: cleanTimeSlot,
-          createdAt: queueEntry.createdAt,
-        },
-      });
+        // Cache idempotent response
+        if (cacheKey && idempotencyKey) {
+          const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          publicBookingIdempotencyCache.set(cacheKey, {
+            status: 201,
+            body: responsePayload,
+            expiresAt: expiresAt.getTime(),
+          });
+
+          // Asynchronously persist to database idempotency table
+          try {
+            await prisma.idempotencyKey?.upsert?.({
+              where: { tenantId_key: { tenantId, key: idempotencyKey } },
+              create: {
+                tenantId,
+                key: idempotencyKey,
+                scope: "PUBLIC_QUEUE_BOOKING",
+                requestHash: crypto
+                  .createHash("sha256")
+                  .update(JSON.stringify(req.body || {}))
+                  .digest("hex"),
+                responseStatus: 201,
+                responseBody: responsePayload,
+                expiresAt,
+              },
+              update: {
+                responseStatus: 201,
+                responseBody: responsePayload,
+              },
+            });
+          } catch {
+            // Safe fallback if database idempotency table is unavailable
+          }
+        }
+
+        return { status: 201, body: responsePayload };
+      };
+
+      if (cacheKey) {
+        const promise = executeBooking().finally(() => {
+          inFlightBookings.delete(cacheKey);
+        });
+        inFlightBookings.set(cacheKey, promise);
+        const result = await promise;
+        res.status(result.status).json(result.body);
+      } else {
+        const result = await executeBooking();
+        res.status(result.status).json(result.body);
+      }
     } catch (error) {
       next(error);
     }

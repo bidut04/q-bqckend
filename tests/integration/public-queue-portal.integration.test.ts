@@ -24,6 +24,10 @@ vi.mock("../../src/config/prisma", () => ({
     queueEntry: {
       create: vi.fn(),
     },
+    idempotencyKey: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
   },
 }));
 
@@ -56,6 +60,7 @@ describe("Public Queue Portal Integration Test Suite", () => {
     const res = {
       status: vi.fn().mockReturnThis(),
       json: vi.fn().mockReturnThis(),
+      setHeader: vi.fn().mockReturnThis(),
     } as unknown as Response;
 
     const next = vi.fn();
@@ -367,6 +372,48 @@ describe("Public Queue Portal Integration Test Suite", () => {
           }),
         }),
       });
+    });
+
+    it("should guarantee idempotency by returning the identical token for repeated requests with same Idempotency-Key", async () => {
+      const mockQueue = {
+        id: "queue-101",
+        locationId: "branch-01",
+        serviceId: "srv-01",
+        lastTokenNumber: 40,
+        tokenPrefix: "SB",
+      };
+      (prisma.queue.findFirst as any).mockResolvedValue(mockQueue);
+      (prisma.queue.update as any).mockResolvedValue({ ...mockQueue, lastTokenNumber: 41 });
+      (prisma.queueEntry.create as any).mockResolvedValue({
+        id: "entry-idemp-1",
+        tokenNumber: 41,
+        tokenLabel: "SB41",
+        status: "WAITING",
+        metadata: { customerName: "Repeat User" },
+      });
+
+      const body = {
+        branchId: "branch-01",
+        serviceId: "srv-01",
+        customerName: "Repeat User",
+      };
+      const headers = { "idempotency-key": "idemp-client-uuid-12345" };
+
+      // First Request
+      const reqRes1 = createMockReqRes({ params: { id: "tenant-sbi" }, body, headers });
+      await controller.bookPublicToken(reqRes1.req, reqRes1.res, reqRes1.next);
+      expect(reqRes1.res.status).toHaveBeenCalledWith(201);
+      expect(prisma.queue.update).toHaveBeenCalledTimes(1);
+
+      // Duplicate Request (same idempotency-key header)
+      const reqRes2 = createMockReqRes({ params: { id: "tenant-sbi" }, body, headers });
+      await controller.bookPublicToken(reqRes2.req, reqRes2.res, reqRes2.next);
+
+      // Verify that the second call immediately returned the cached idempotent response
+      expect(reqRes2.res.setHeader).toHaveBeenCalledWith("X-Cache-Lookup", "HIT-IDEMPOTENT");
+      expect(reqRes2.res.status).toHaveBeenCalledWith(201);
+      // Ensure queue counter was NOT updated twice
+      expect(prisma.queue.update).toHaveBeenCalledTimes(1);
     });
   });
 });

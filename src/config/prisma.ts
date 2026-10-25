@@ -53,6 +53,7 @@ export const prisma = new Proxy({} as PrismaClient, {
       "platformSetting",
       "platformRolePermission",
       "platformIdempotencyKey",
+      "idempotencyKey",
       "adminAuditLog",
     ]);
 
