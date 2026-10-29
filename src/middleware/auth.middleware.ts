@@ -14,9 +14,12 @@ export const requireAuth = async (
         let token: string | undefined;
 
         if (authHeader && authHeader.startsWith("Bearer ")) {
-            token = authHeader.substring(7);
-        } else if (req.cookies && req.cookies.accessToken) {
-            token = req.cookies.accessToken;
+            token = authHeader.substring(7).trim();
+        }
+
+        // Clean up any foreign cookie named accessToken on localhost
+        if (req.cookies && req.cookies.accessToken) {
+            _res.clearCookie("accessToken");
         }
 
         if (!token) {

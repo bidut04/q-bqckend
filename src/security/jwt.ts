@@ -9,43 +9,35 @@ export interface AccessTokenPayload {
 }
 
 
-const JWT_SECRET =
-  process.env.JWT_ACCESS_SECRET!;
+const getJwtSecret = () =>
+  process.env.JWT_ACCESS_SECRET || "super-secret-jwt-access-key-epaper-2026";
 
-const JWT_ISSUER =
-  process.env.JWT_ISSUER ?? "your-api";
+const getJwtIssuer = () =>
+  process.env.JWT_ISSUER || "http://localhost:8989";
 
-const JWT_AUDIENCE =
-  process.env.JWT_AUDIENCE ?? "your-client";
+const getJwtAudience = () =>
+  process.env.JWT_AUDIENCE || "your-client";
 
-
-if (!JWT_SECRET) {
-  throw new Error(
-    "JWT_ACCESS_SECRET is missing",
-  );
-}
-
-export function createAccessToken(payload:Omit<AccessTokenPayload, "jti">):string {
+export function createAccessToken(payload: Omit<AccessTokenPayload, "jti">): string {
   const options: SignOptions = {
     algorithm: "HS256",
     expiresIn: "10m",
-    issuer: JWT_ISSUER,
-    audience: JWT_AUDIENCE,
+    issuer: getJwtIssuer(),
+    audience: getJwtAudience(),
   };
 
   return jwt.sign(
     payload,
-    JWT_SECRET,
+    getJwtSecret(),
     options,
   );
-
 }
-export function veryfyAccessToken(token: string): AccessTokenPayload {
 
-  return jwt.verify(token, JWT_SECRET, {
+export function veryfyAccessToken(token: string): AccessTokenPayload {
+  return jwt.verify(token, getJwtSecret(), {
     algorithms: ["HS256"],
-    issuer: JWT_ISSUER,
-    audience: JWT_AUDIENCE,
+    issuer: getJwtIssuer(),
+    audience: getJwtAudience(),
   }) as AccessTokenPayload;
 }
 export const verifyAccessToken = veryfyAccessToken;

@@ -17,6 +17,13 @@ export const createAuthRouter = (deps: {
   router.post("/logout-all", requireAuth, deps.authController.logoutAll);
   router.post("/change-password", requireAuth, deps.authController.changePassword);
 
+  // Google OAuth 2.0 Routes
+  router.get("/google", deps.authController.googleLogin);
+  router.get("/google/callback", deps.authController.googleCallback);
+
+  // Authenticated user profile
+  router.get("/me", requireAuth, deps.authController.getMe);
+
   // OTP Routes (Powered by Brevo Email)
   router.post("/send-otp", deps.otpController.sendOtp);
   router.post("/verify-otp", deps.otpController.verifyOtp);

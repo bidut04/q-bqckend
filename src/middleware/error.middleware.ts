@@ -92,10 +92,12 @@ export const errorMiddleware: ErrorRequestHandler = (
   }
 
   if (error instanceof jwt.JsonWebTokenError) {
+    console.warn("[JWT Error]:", error.name, error.message);
     res.status(401).json({
       success: false,
       code: "INVALID_TOKEN",
       message: "Invalid access token",
+      details: isProduction ? undefined : error.message,
     });
     return;
   }

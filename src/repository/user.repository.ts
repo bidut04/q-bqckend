@@ -1,4 +1,4 @@
-import { PrismaClient, Role, User } from "@prisma/client";
+import { AuthProvider, PrismaClient, Role, User } from "@prisma/client";
 
 export const createUserRepository = (prisma: PrismaClient) => {
     const findById = async (id: string): Promise<User | null> => {
@@ -117,6 +117,52 @@ export const createUserRepository = (prisma: PrismaClient) => {
         }
     };
 
+    const findOrCreateGoogleUser = async (data: {
+        email: string;
+        googleId: string;
+        name?: string;
+    }): Promise<User> => {
+        let user = await prisma.user.findUnique({
+            where: { email: data.email },
+        });
+
+        if (!user) {
+            user = await prisma.user.create({
+                data: {
+                    email: data.email,
+                    isVerified: true,
+                    role: Role.USER,
+                },
+            });
+        } else if (!user.isVerified) {
+            user = await prisma.user.update({
+                where: { id: user.id },
+                data: { isVerified: true },
+            });
+        }
+
+        const existingAccount = await prisma.account.findUnique({
+            where: {
+                provider_providerAccountId: {
+                    provider: AuthProvider.GOOGLE,
+                    providerAccountId: data.googleId,
+                },
+            },
+        });
+
+        if (!existingAccount) {
+            await prisma.account.create({
+                data: {
+                    userId: user.id,
+                    provider: AuthProvider.GOOGLE,
+                    providerAccountId: data.googleId,
+                },
+            });
+        }
+
+        return user;
+    };
+
     return {
         findById,
         findByEmail,
@@ -128,6 +174,7 @@ export const createUserRepository = (prisma: PrismaClient) => {
         incrementSecurityVersion,
         updatePassword,
         getUserAuthorities,
+        findOrCreateGoogleUser,
     };
 };
 

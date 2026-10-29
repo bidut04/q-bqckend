@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "node:crypto";
+import jwt from "jsonwebtoken";
 import { verifyAccessToken } from "../../security/jwt";
 import { ForbiddenError, UnauthorizedError } from "../../lib/errors";
 import { Permission, PLATFORM_ROLE_PERMISSIONS } from "../../core/authorization/permissions";
@@ -30,14 +31,18 @@ export const requirePlatformAuth = async (req: Request, _res: Response, next: Ne
     let token: string | undefined;
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
-      token = authHeader.substring(7);
-    } else if (req.cookies && req.cookies.accessToken) {
-      token = req.cookies.accessToken;
+      token = authHeader.substring(7).trim();
+    }
+
+    // Clean up any foreign cookie named accessToken on localhost
+    if (req.cookies && req.cookies.accessToken) {
+      _res.clearCookie("accessToken");
     }
 
     if (!token) {
       throw new UnauthorizedError("Authentication token is missing");
     }
+
 
     const payload = verifyAccessToken(token);
     const userId = payload.sub;

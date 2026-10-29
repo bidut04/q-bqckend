@@ -442,6 +442,207 @@ export const createAuthService = (deps: AuthServiceDeps) => {
     });
   };
 
+  /**
+   * --------------------------------------------------------------------------
+   * GOOGLE OAUTH
+   * --------------------------------------------------------------------------
+   */
+  const getGoogleAuthUrl = (state?: string): string => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const redirectUri = process.env.GOOGLE_CALLBACK_URL || "http://localhost:8989/api/v1/auth/google/callback";
+    if (!clientId) {
+      throw new AppError("Google OAuth is not configured. Missing GOOGLE_CLIENT_ID in backend .env", 500, "GOOGLE_OAUTH_NOT_CONFIGURED");
+    }
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      access_type: "offline",
+      prompt: "select_account",
+    });
+
+    if (state) {
+      params.append("state", state);
+    }
+
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  };
+
+  const handleGoogleCallback = async (input: {
+    code: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }) => {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const redirectUri = process.env.GOOGLE_CALLBACK_URL || "http://localhost:8989/api/v1/auth/google/callback";
+
+    if (!clientId || !clientSecret) {
+      throw new AppError("Google OAuth is not configured. Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in backend .env", 500, "GOOGLE_OAUTH_NOT_CONFIGURED");
+    }
+
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        code: input.code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    const tokenData = (await tokenResponse.json()) as any;
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      throw new AppError(tokenData?.error_description || "Failed to exchange code with Google", 401, "GOOGLE_AUTH_FAILED");
+    }
+
+    const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+      },
+    });
+
+    const googleUser = (await userInfoResponse.json()) as any;
+    if (!userInfoResponse.ok || !googleUser.email) {
+      throw new AppError("Failed to fetch Google profile information", 401, "GOOGLE_PROFILE_FETCH_FAILED");
+    }
+
+    const email = googleUser.email.trim().toLowerCase();
+    const googleId = googleUser.sub;
+    const name = googleUser.name;
+
+    const user = await deps.userRepository.findOrCreateGoogleUser({
+      email,
+      googleId,
+      name,
+    });
+
+    if (!user.isActive) {
+      throw new AppError("Account is disabled", 403, "ACCOUNT_DISABLED");
+    }
+
+    const sessionId = generateId();
+    const familyId = generateFamilyId();
+    const refreshToken = generateRandomToken(64);
+    const refreshTokenHash = hashToken(refreshToken);
+    const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await deps.authRepository.createLoginState({
+      userId: user.id,
+      sessionId,
+      familyId,
+      refreshTokenId: generateId(),
+      refreshTokenHash,
+      expiresAt: refreshExpiresAt,
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+    });
+
+    await deps.userRepository.updateLastLogin(user.id);
+    await deps.securityCache.setSecurityVersion(user.id, user.securityVersion);
+
+    const authorities = await deps.userRepository.getUserAuthorities(user.id);
+    const isPlatformSuperAdmin = authorities?.platformMember?.status === "ACTIVE";
+    const tenantMemberships = authorities?.tenantMemberships || [];
+    const isTenantAdmin = tenantMemberships.some(
+      (m: any) => m.adminRole === "TENANT_OWNER" || m.adminRole === "TENANT_ADMIN"
+    );
+
+    let userType: "PLATFORM_SUPER_ADMIN" | "TENANT_ADMIN" | "USER" = "USER";
+    if (isPlatformSuperAdmin) {
+      userType = "PLATFORM_SUPER_ADMIN";
+    } else if (isTenantAdmin) {
+      userType = "TENANT_ADMIN";
+    }
+
+    const effectiveRole = isPlatformSuperAdmin
+      ? (authorities?.platformMember?.role || "PLATFORM_OWNER")
+      : isTenantAdmin
+      ? "TENANT_ADMIN"
+      : user.role;
+
+    const accessToken = createAccessToken({
+      sub: user.id,
+      sid: sessionId,
+      role: effectiveRole,
+      securityVersion: user.securityVersion,
+    });
+
+    await deps.authRepository.createAuditLog({
+      userId: user.id,
+      action: AuditAction.LOGIN_SUCCESS,
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+      details: { sessionId, userType, provider: "GOOGLE" },
+    });
+
+    return {
+      accessToken,
+      refreshToken,
+      expiresIn: 600,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: effectiveRole,
+        userType,
+        isSuperAdmin: isPlatformSuperAdmin,
+        tenants: tenantMemberships.map((m: any) => ({
+          tenantId: m.tenantId,
+          adminRole: m.adminRole,
+          name: m.tenant?.name,
+          slug: m.tenant?.slug,
+        })),
+      },
+    };
+  };
+
+  const getUserProfile = async (userId: string) => {
+    const user = await deps.userRepository.findById(userId);
+    if (!user) {
+      throw new AppError("User not found", 404, "USER_NOT_FOUND");
+    }
+
+    const authorities = await deps.userRepository.getUserAuthorities(user.id);
+    const isPlatformSuperAdmin = authorities?.platformMember?.status === "ACTIVE";
+    const tenantMemberships = authorities?.tenantMemberships || [];
+    const isTenantAdmin = tenantMemberships.some(
+      (m: any) => m.adminRole === "TENANT_OWNER" || m.adminRole === "TENANT_ADMIN"
+    );
+
+    let userType: "PLATFORM_SUPER_ADMIN" | "TENANT_ADMIN" | "USER" = "USER";
+    if (isPlatformSuperAdmin) {
+      userType = "PLATFORM_SUPER_ADMIN";
+    } else if (isTenantAdmin) {
+      userType = "TENANT_ADMIN";
+    }
+
+    const effectiveRole = isPlatformSuperAdmin
+      ? (authorities?.platformMember?.role || "PLATFORM_OWNER")
+      : isTenantAdmin
+      ? "TENANT_ADMIN"
+      : user.role;
+
+    return {
+      id: user.id,
+      email: user.email,
+      role: effectiveRole,
+      userType,
+      isSuperAdmin: isPlatformSuperAdmin,
+      tenants: tenantMemberships.map((m: any) => ({
+        tenantId: m.tenantId,
+        adminRole: m.adminRole,
+        name: m.tenant?.name,
+        slug: m.tenant?.slug,
+      })),
+    };
+  };
+
   return {
     register,
     login,
@@ -449,8 +650,11 @@ export const createAuthService = (deps: AuthServiceDeps) => {
     logout,
     logoutAll,
     changePassword,
+    getGoogleAuthUrl,
+    handleGoogleCallback,
+    getUserProfile,
   };
 };
 
 export type AuthService = ReturnType<typeof createAuthService>;
-export const AuthService = createAuthService;
+export const AuthService = createAuthService;

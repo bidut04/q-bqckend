@@ -215,6 +215,67 @@ export const createAuthController = (authService: AuthService) => {
     }
   };
 
+  const googleLogin = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const authUrl = authService.getGoogleAuthUrl();
+      res.redirect(authUrl);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const googleCallback = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      console.log("[Google OAuth Callback] Query params:", req.query);
+      const { code, error } = req.query;
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+
+      if (error || !code) {
+        const errorDesc = (req.query.error_description as string) || (error as string) || "OAuth access denied";
+        console.warn("[Google OAuth Callback] Denied or missing code:", { error, errorDesc });
+        res.redirect(`${frontendUrl}/login?error=${encodeURIComponent(errorDesc)}`);
+        return;
+      }
+
+      const ipAddress = req.ip || req.socket.remoteAddress || "127.0.0.1";
+      const userAgent = req.headers["user-agent"];
+
+      const result = await authService.handleGoogleCallback({
+        code: String(code),
+        ipAddress,
+        userAgent,
+      });
+
+      if (result.refreshToken) {
+        setRefreshTokenCookie(res, result.refreshToken);
+      }
+
+      const userParam = encodeURIComponent(JSON.stringify(result.user));
+      res.redirect(`${frontendUrl}/login?token=${encodeURIComponent(result.accessToken)}&user=${userParam}`);
+    } catch (error: any) {
+      console.error("[Google OAuth Callback Error]:", error);
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+      const errorMsg = error?.message || "Google authentication failed";
+      res.redirect(`${frontendUrl}/login?error=${encodeURIComponent(errorMsg)}`);
+    }
+  };
+
+  const getMe = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new AppError("Unauthorized", 401, "UNAUTHORIZED");
+      }
+      const userDetails = await authService.getUserProfile(userId);
+      res.status(200).json({
+        success: true,
+        user: userDetails,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     register,
     login,
@@ -222,7 +283,11 @@ export const createAuthController = (authService: AuthService) => {
     logout,
     logoutAll,
     changePassword,
+    googleLogin,
+    googleCallback,
+    getMe,
   };
 };
 
 export type AuthController = ReturnType<typeof createAuthController>;
+
