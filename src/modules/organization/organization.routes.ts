@@ -2,7 +2,7 @@ import { Router } from "express";
 import { OrganizationController } from "./organization.controller";
 import { requireAuth } from "../../middleware/auth.middleware";
 import { requireAdmin } from "../../middleware/admin.middleware";
-import { publicBookingRateLimiter } from "../../middleware/rate-limit.middleware";
+import { publicBookingRateLimiter, publicBookingSlidingLimiter } from "../../middleware/rate-limit.middleware";
 
 export const createOrganizationRouter = (controller: OrganizationController) => {
   const router = Router();
@@ -11,7 +11,8 @@ export const createOrganizationRouter = (controller: OrganizationController) => 
   router.get("/", controller.listPublic);
   router.get("/:id/services", controller.listTenantServices);
   router.get("/:id/branches", controller.listTenantBranches);
-  router.post("/:id/book-token", publicBookingRateLimiter, controller.bookPublicToken);
+  router.post("/:id/book-token", publicBookingSlidingLimiter, controller.bookPublicToken);
+
 
   // Public / Semi-public: organization admin registers a new organization
   router.post("/register", controller.register);

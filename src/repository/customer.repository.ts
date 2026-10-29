@@ -41,12 +41,14 @@ export const createCustomerRepository = () => {
 
 export type CustomerRepository = ReturnType<typeof createCustomerRepository>;
 
-export class CustomerRepositoryAdapter {
-  private repo = createCustomerRepository();
-  findById = this.repo.findById;
-  findByPhone = this.repo.findByPhone;
-  createCustomer = this.repo.createCustomer;
-}
+export const createCustomerRepositoryAdapter = () => createCustomerRepository();
+
+export const CustomerRepositoryAdapter = function (this: unknown) {
+  return createCustomerRepository();
+} as unknown as {
+  new (): ReturnType<typeof createCustomerRepository>;
+};
 
 export const CustomerRepository = CustomerRepositoryAdapter as unknown as typeof CustomerRepositoryAdapter &
   typeof createCustomerRepository;
+

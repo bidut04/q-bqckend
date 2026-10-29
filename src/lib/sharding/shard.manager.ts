@@ -14,86 +14,149 @@ import type { CircuitState, ShardMetrics } from "./shard.types";
 
 export type { CircuitState, ShardMetrics };
 
-export class ShardCircuitBreaker {
-  public state: CircuitState = "CLOSED";
-  public consecutiveFailures = 0;
-  public totalRequests = 0;
-  public totalFailures = 0;
-  public lastFailureReason: string | null = null;
-  public lastFailureTime: string | null = null;
-  public lastSuccessTime: string | null = null;
-  public lastStateChangeTime = Date.now();
-  private halfOpenSuccesses = 0;
+export const createShardCircuitBreaker = (
+  shardId: string,
+  failureThreshold = 5,
+  resetTimeoutMs = 30000,
+  halfOpenSuccessThreshold = 2,
+  maxHalfOpenProbes = 2
+) => {
+  let state: CircuitState = "CLOSED";
+  let consecutiveFailures = 0;
+  let totalRequests = 0;
+  let totalFailures = 0;
+  let lastFailureReason: string | null = null;
+  let lastFailureTime: string | null = null;
+  let lastSuccessTime: string | null = null;
+  let lastStateChangeTime = Date.now();
+  let halfOpenSuccesses = 0;
+  let inFlightProbes = 0;
 
-  constructor(
-    public readonly shardId: string,
-    private readonly failureThreshold = 5,
-    private readonly resetTimeoutMs = 30000,
-    private readonly halfOpenSuccessThreshold = 2
-  ) {}
+  const transitionTo = (newState: CircuitState): void => {
+    console.warn(`[ShardCircuitBreaker] Shard '${shardId}' state changed: ${state} ──► ${newState}`);
+    state = newState;
+    lastStateChangeTime = Date.now();
+    if (newState === "HALF_OPEN") {
+      halfOpenSuccesses = 0;
+      inFlightProbes = 0;
+    } else if (newState === "OPEN") {
+      inFlightProbes = 0;
+    }
+  };
 
-  public canExecute(): boolean {
-    if (this.state === "CLOSED") {
+  const canExecute = (): boolean => {
+    if (state === "CLOSED") {
       return true;
     }
 
-    if (this.state === "OPEN") {
-      const elapsed = Date.now() - this.lastStateChangeTime;
-      if (elapsed >= this.resetTimeoutMs) {
-        this.transitionTo("HALF_OPEN");
-        return true;
+    if (state === "OPEN") {
+      const elapsed = Date.now() - lastStateChangeTime;
+      if (elapsed >= resetTimeoutMs) {
+        transitionTo("HALF_OPEN");
+        if (inFlightProbes < maxHalfOpenProbes) {
+          inFlightProbes += 1;
+          return true;
+        }
       }
       throw new ShardUnavailableError(
-        this.shardId,
+        shardId,
         `Circuit breaker OPEN. Fast-failing requests to protect database resources. Reset in ${Math.ceil(
-          (this.resetTimeoutMs - elapsed) / 1000
+          (resetTimeoutMs - elapsed) / 1000
         )}s`
       );
     }
 
-    // HALF_OPEN mode allows canary probes
-    return true;
-  }
-
-  public recordSuccess(): void {
-    this.totalRequests += 1;
-    this.lastSuccessTime = new Date().toISOString();
-
-    if (this.state === "HALF_OPEN") {
-      this.halfOpenSuccesses += 1;
-      if (this.halfOpenSuccesses >= this.halfOpenSuccessThreshold) {
-        this.transitionTo("CLOSED");
-        this.consecutiveFailures = 0;
-        this.halfOpenSuccesses = 0;
+    if (state === "HALF_OPEN") {
+      if (inFlightProbes < maxHalfOpenProbes) {
+        inFlightProbes += 1;
+        return true;
       }
-    } else if (this.state === "CLOSED") {
-      this.consecutiveFailures = 0;
+      throw new ShardUnavailableError(
+        shardId,
+        `Circuit breaker HALF_OPEN. Canary probe limit reached (${inFlightProbes}/${maxHalfOpenProbes}). Holding traffic while verifying database recovery.`
+      );
     }
-  }
 
-  public recordFailure(reason: string): void {
-    this.totalRequests += 1;
-    this.totalFailures += 1;
-    this.consecutiveFailures += 1;
-    this.lastFailureReason = reason;
-    this.lastFailureTime = new Date().toISOString();
+    return true;
+  };
 
-    if (this.state === "HALF_OPEN") {
-      this.transitionTo("OPEN");
-    } else if (this.state === "CLOSED" && this.consecutiveFailures >= this.failureThreshold) {
-      this.transitionTo("OPEN");
+  const recordSuccess = (): void => {
+    totalRequests += 1;
+    lastSuccessTime = new Date().toISOString();
+
+    if (state === "HALF_OPEN") {
+      inFlightProbes = Math.max(0, inFlightProbes - 1);
+      halfOpenSuccesses += 1;
+      if (halfOpenSuccesses >= halfOpenSuccessThreshold) {
+        transitionTo("CLOSED");
+        consecutiveFailures = 0;
+        halfOpenSuccesses = 0;
+        inFlightProbes = 0;
+      }
+    } else if (state === "CLOSED") {
+      consecutiveFailures = 0;
     }
-  }
+  };
 
-  private transitionTo(newState: CircuitState): void {
-    console.warn(`[ShardCircuitBreaker] Shard '${this.shardId}' state changed: ${this.state} ──► ${newState}`);
-    this.state = newState;
-    this.lastStateChangeTime = Date.now();
-    if (newState === "HALF_OPEN") {
-      this.halfOpenSuccesses = 0;
+  const recordFailure = (reason: string): void => {
+    totalRequests += 1;
+    totalFailures += 1;
+    consecutiveFailures += 1;
+    lastFailureReason = reason;
+    lastFailureTime = new Date().toISOString();
+
+    if (state === "HALF_OPEN") {
+      inFlightProbes = 0;
+      transitionTo("OPEN");
+    } else if (state === "CLOSED" && consecutiveFailures >= failureThreshold) {
+      transitionTo("OPEN");
     }
-  }
-}
+  };
+
+  return {
+    get shardId() { return shardId; },
+    get state() { return state; },
+    set state(s: CircuitState) { state = s; },
+    get consecutiveFailures() { return consecutiveFailures; },
+    set consecutiveFailures(c: number) { consecutiveFailures = c; },
+    get totalRequests() { return totalRequests; },
+    get totalFailures() { return totalFailures; },
+    get inFlightProbes() { return inFlightProbes; },
+    get maxHalfOpenProbes() { return maxHalfOpenProbes; },
+    get lastFailureReason() { return lastFailureReason; },
+    get lastFailureTime() { return lastFailureTime; },
+    get lastSuccessTime() { return lastSuccessTime; },
+    get lastStateChangeTime() { return lastStateChangeTime; },
+    set lastStateChangeTime(t: number) { lastStateChangeTime = t; },
+    canExecute,
+    recordSuccess,
+    recordFailure,
+  };
+};
+
+export type ShardCircuitBreakerInstance = ReturnType<typeof createShardCircuitBreaker>;
+export type ShardCircuitBreaker = ShardCircuitBreakerInstance;
+
+export const ShardCircuitBreaker = function (
+  this: unknown,
+  shardId: string,
+  failureThreshold = 5,
+  resetTimeoutMs = 30000,
+  halfOpenSuccessThreshold = 2,
+  maxHalfOpenProbes = 2
+) {
+  return createShardCircuitBreaker(shardId, failureThreshold, resetTimeoutMs, halfOpenSuccessThreshold, maxHalfOpenProbes);
+} as unknown as {
+  new (
+    shardId: string,
+    failureThreshold?: number,
+    resetTimeoutMs?: number,
+    halfOpenSuccessThreshold?: number,
+    maxHalfOpenProbes?: number
+  ): ShardCircuitBreakerInstance;
+};
+
+
 
 // ============================================================================
 // CONNECTION POOL ENRICHMENT & RETRY HELPERS
@@ -153,14 +216,27 @@ export const executeWithRetry = async <T>(
   shardId: string,
   fn: () => Promise<T>,
   maxAttempts = 3,
-  baseDelayMs = 100
+  baseDelayMs = 100,
+  maxDeadlineMs = 8000
 ): Promise<T> => {
   const breaker = getShardCircuitBreaker(shardId);
   breaker.canExecute();
 
+  const startTime = Date.now();
   let attempt = 0;
   while (attempt < maxAttempts) {
     attempt += 1;
+
+    // Check operation deadline before executing attempt
+    const elapsed = Date.now() - startTime;
+    if (elapsed >= maxDeadlineMs) {
+      breaker.recordFailure("Operation deadline exceeded");
+      throw new ShardUnavailableError(
+        shardId,
+        `Database operation deadline of ${maxDeadlineMs}ms exceeded (elapsed: ${elapsed}ms) across ${attempt - 1} attempts.`
+      );
+    }
+
     try {
       const result = await fn();
       breaker.recordSuccess();
@@ -168,8 +244,9 @@ export const executeWithRetry = async <T>(
     } catch (error) {
       const isTransient = isTransientDbError(error);
       const errMsg = (error as Error).message || "Unknown DB error";
+      const remainingTime = maxDeadlineMs - (Date.now() - startTime);
 
-      if (!isTransient || attempt >= maxAttempts) {
+      if (!isTransient || attempt >= maxAttempts || remainingTime <= 50) {
         breaker.recordFailure(errMsg);
         if (error instanceof ShardNotFoundError || error instanceof ShardUnavailableError) {
           throw error;
@@ -177,18 +254,22 @@ export const executeWithRetry = async <T>(
         throw new ShardUnavailableError(shardId, errMsg);
       }
 
-      // Exponential backoff with full jitter: rand(0, min(10s, base * 2^attempt))
+      // Exponential backoff with full jitter bounded strictly by remaining deadline:
       const maxJitter = Math.min(10000, baseDelayMs * Math.pow(2, attempt));
-      const jitterDelay = Math.floor(Math.random() * maxJitter);
-      console.warn(
-        `[ShardManager Retry] Transient DB error on shard '${shardId}' (attempt ${attempt}/${maxAttempts}). Retrying in ${jitterDelay}ms...`
-      );
-      await new Promise((res) => setTimeout(res, jitterDelay));
+      const jitterDelay = Math.min(Math.floor(Math.random() * maxJitter), remainingTime - 10);
+
+      if (jitterDelay > 0) {
+        console.warn(
+          `[ShardManager Retry] Transient DB error on shard '${shardId}' (attempt ${attempt}/${maxAttempts}). Retrying in ${jitterDelay}ms (deadline remaining: ${remainingTime}ms)... Reason: ${errMsg}`
+        );
+        await new Promise((res) => setTimeout(res, jitterDelay));
+      }
     }
   }
 
   throw new ShardUnavailableError(shardId, `Exhausted ${maxAttempts} retry attempts`);
 };
+
 
 // ============================================================================
 // SHARD MANAGER CORE METHODS
@@ -274,11 +355,28 @@ export const disconnectShard = async (shardId: string): Promise<void> => {
 };
 
 export const disconnectAllShards = async (): Promise<void> => {
-  await disconnectCatalogDb();
-  await Promise.all(Array.from(clients.values()).map((client) => client.$disconnect()));
+  try {
+    await disconnectCatalogDb();
+  } catch (err) {
+    console.warn("[ShardManager] Error disconnecting catalog DB:", (err as Error).message);
+  }
+
+  const clientList = Array.from(clients.entries());
+  await Promise.allSettled(
+    clientList.map(async ([shardId, client]) => {
+      try {
+        await client.$disconnect();
+      } catch (err) {
+        console.warn(`[ShardManager] Error disconnecting shard '${shardId}':`, (err as Error).message);
+        throw err;
+      }
+    })
+  );
+
   clients.clear();
   poolCreationTimes.clear();
 };
+
 
 export const getShardMetrics = (shardId: string): ShardMetrics => {
   const breaker = getShardCircuitBreaker(shardId);

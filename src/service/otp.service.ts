@@ -14,231 +14,243 @@ interface StoredOtpData {
 const memoryOtpCache = new Map<string, StoredOtpData>();
 const memoryRateLimitCache = new Map<string, number>();
 
-export class OtpService {
-  private readonly OTP_TTL_SECONDS = 300; // 5 minutes
-  private readonly RATE_LIMIT_SECONDS = 60; // 1 minute between sends
-  private readonly MAX_ATTEMPTS = 5;
+const OTP_TTL_SECONDS = 300; // 5 minutes
+const RATE_LIMIT_SECONDS = 60; // 1 minute between sends
+const MAX_ATTEMPTS = 5;
 
-  /**
-   * Hashes the raw OTP using SHA-256
-   */
-  private hashOtp(otp: string): string {
-    return crypto.createHash("sha256").update(otp.trim()).digest("hex");
-  }
+/**
+ * Hashes the raw OTP using SHA-256
+ */
+const hashOtp = (otp: string): string => {
+  return crypto.createHash("sha256").update(otp.trim()).digest("hex");
+};
 
-  /**
-   * Generates a 6-digit cryptographically random OTP
-   */
-  private generateOtp(): string {
-    return crypto.randomInt(100000, 1000000).toString();
-  }
+/**
+ * Generates a 6-digit cryptographically random OTP
+ */
+const generateOtp = (): string => {
+  return crypto.randomInt(100000, 1000000).toString();
+};
 
-  /**
-   * Send OTP to the given email
-   */
-  public async sendOtp(input: {
-    email: string;
-    purpose?: string;
-    recipientName?: string;
-  }): Promise<{ success: boolean; message: string; expiresInSeconds: number }> {
-    const email = input.email.trim().toLowerCase();
-    const purpose = input.purpose || "Verification";
+const saveToMemory = (email: string, otpHash: string) => {
+  memoryOtpCache.set(email, {
+    hash: otpHash,
+    attempts: 0,
+    expiresAt: Date.now() + OTP_TTL_SECONDS * 1000,
+  });
+  memoryRateLimitCache.set(email, Date.now() + RATE_LIMIT_SECONDS * 1000);
+};
 
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      throw new AppError("Invalid email address format", 400, "INVALID_EMAIL");
-    }
-
-    // 1. Enforce cooldown rate limit (1 OTP per 60 seconds)
-    const rateLimitKey = redisKeys.emailOtpRateLimit(email);
-    let isRateLimited = false;
-
+const invalidateOtp = async (email: string, usingRedis: boolean) => {
+  const otpKey = redisKeys.emailOtp(email);
+  if (usingRedis) {
     try {
-      if (redisClient.status === "ready") {
-        const remaining = await redisClient.ttl(rateLimitKey);
-        if (remaining > 0) {
-          isRateLimited = true;
-        }
-      } else {
-        const until = memoryRateLimitCache.get(email);
-        if (until && until > Date.now()) {
-          isRateLimited = true;
-        }
-      }
+      await redisClient.del(otpKey);
     } catch {
+      // ignore
+    }
+  }
+  memoryOtpCache.delete(email);
+};
+
+/**
+ * Send OTP to the given email
+ */
+export const sendOtp = async (input: {
+  email: string;
+  purpose?: string;
+  recipientName?: string;
+}): Promise<{ success: boolean; message: string; expiresInSeconds: number }> => {
+  const email = input.email.trim().toLowerCase();
+  const purpose = input.purpose || "Verification";
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new AppError("Invalid email address format", 400, "INVALID_EMAIL");
+  }
+
+  // 1. Enforce cooldown rate limit (1 OTP per 60 seconds)
+  const rateLimitKey = redisKeys.emailOtpRateLimit(email);
+  let isRateLimited = false;
+
+  try {
+    if (redisClient.status === "ready") {
+      const remaining = await redisClient.ttl(rateLimitKey);
+      if (remaining > 0) {
+        isRateLimited = true;
+      }
+    } else {
       const until = memoryRateLimitCache.get(email);
       if (until && until > Date.now()) {
         isRateLimited = true;
       }
     }
-
-    if (isRateLimited) {
-      throw new AppError(
-        "Please wait 60 seconds before requesting a new OTP",
-        429,
-        "OTP_RATE_LIMITED"
-      );
+  } catch {
+    const until = memoryRateLimitCache.get(email);
+    if (until && until > Date.now()) {
+      isRateLimited = true;
     }
-
-    // 2. Generate and hash OTP
-    const rawOtp = this.generateOtp();
-    const otpHash = this.hashOtp(rawOtp);
-    const otpKey = redisKeys.emailOtp(email);
-
-    // 3. Store in Redis with fallback to in-memory store
-    try {
-      if (redisClient.status === "ready") {
-        const payload = JSON.stringify({
-          hash: otpHash,
-          attempts: 0,
-          expiresAt: Date.now() + this.OTP_TTL_SECONDS * 1000,
-        });
-
-        await redisClient
-          .multi()
-          .set(otpKey, payload, "EX", this.OTP_TTL_SECONDS)
-          .set(rateLimitKey, "1", "EX", this.RATE_LIMIT_SECONDS)
-          .exec();
-      } else {
-        this.saveToMemory(email, otpHash);
-      }
-    } catch (err) {
-      console.warn("⚠️ Redis unavailable for OTP, using in-memory store:", (err as Error).message);
-      this.saveToMemory(email, otpHash);
-    }
-
-    // 4. Dispatch Email via Brevo
-    await emailService.sendOtpEmail({
-      toEmail: email,
-      otp: rawOtp,
-      recipientName: input.recipientName,
-      purpose,
-      expiryMinutes: Math.floor(this.OTP_TTL_SECONDS / 60),
-    });
-
-    const isDevPreview =
-      (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") &&
-      process.env.ALLOW_DEV_OTP_PREVIEW === "true" &&
-      (!process.env.BREVO_API_KEY || process.env.BREVO_API_KEY.trim() === "");
-
-    return {
-      success: true,
-      message: `OTP sent successfully to ${email}`,
-      expiresInSeconds: this.OTP_TTL_SECONDS,
-      ...(isDevPreview ? { previewOtp: rawOtp } : {}),
-    };
   }
 
-  /**
-   * Verify an OTP provided by the user
-   */
-  public async verifyOtp(input: {
-    email: string;
-    otp: string;
-  }): Promise<{ success: boolean; message: string }> {
-    const email = input.email.trim().toLowerCase();
-    const rawOtp = input.otp ? input.otp.trim() : "";
-
-    if (!email || !rawOtp) {
-      throw new AppError("Email and OTP code are required", 400, "VALIDATION_ERROR");
-    }
-
-    const otpKey = redisKeys.emailOtp(email);
-    let record: StoredOtpData | null = null;
-    let usingRedis = false;
-
-    try {
-      if (redisClient.status === "ready") {
-        const data = await redisClient.get(otpKey);
-        if (data) {
-          record = JSON.parse(data);
-          usingRedis = true;
-        }
-      }
-    } catch (err) {
-      console.warn("⚠️ Redis fetch error during OTP verification:", (err as Error).message);
-    }
-
-    // Check memory store if not found in Redis
-    if (!record) {
-      const memoryRecord = memoryOtpCache.get(email);
-      if (memoryRecord && memoryRecord.expiresAt > Date.now()) {
-        record = memoryRecord;
-      }
-    }
-
-    if (!record) {
-      throw new AppError("OTP has expired or was not requested", 400, "OTP_EXPIRED_OR_INVALID");
-    }
-
-    // Check attempt threshold to prevent brute-force attacks
-    if (record.attempts >= this.MAX_ATTEMPTS) {
-      await this.invalidateOtp(email, usingRedis);
-      throw new AppError(
-        "Too many failed attempts. This OTP is now invalid. Please request a new one.",
-        429,
-        "OTP_MAX_ATTEMPTS_EXCEEDED"
-      );
-    }
-
-    const providedHash = this.hashOtp(rawOtp);
-    const isMatch = crypto.timingSafeEqual(
-      Buffer.from(record.hash, "hex"),
-      Buffer.from(providedHash, "hex")
+  if (isRateLimited) {
+    throw new AppError(
+      "Please wait 60 seconds before requesting a new OTP",
+      429,
+      "OTP_RATE_LIMITED"
     );
+  }
 
-    if (!isMatch) {
-      // Increment attempt counter
-      record.attempts += 1;
-      if (usingRedis) {
-        try {
-          const remainingTtl = await redisClient.ttl(otpKey);
-          if (remainingTtl > 0) {
-            await redisClient.set(otpKey, JSON.stringify(record), "EX", remainingTtl);
-          }
-        } catch {
-          // ignore error
-        }
-      } else {
-        memoryOtpCache.set(email, record);
-      }
+  // 2. Generate and hash OTP
+  const rawOtp = generateOtp();
+  const otpHash = hashOtp(rawOtp);
+  const otpKey = redisKeys.emailOtp(email);
 
-      const attemptsLeft = this.MAX_ATTEMPTS - record.attempts;
-      throw new AppError(
-        `Invalid OTP code. ${attemptsLeft} attempt(s) remaining.`,
-        400,
-        "INVALID_OTP"
-      );
+  // 3. Store in Redis with fallback to in-memory store
+  try {
+    if (redisClient.status === "ready") {
+      const payload = JSON.stringify({
+        hash: otpHash,
+        attempts: 0,
+        expiresAt: Date.now() + OTP_TTL_SECONDS * 1000,
+      });
+
+      await redisClient
+        .multi()
+        .set(otpKey, payload, "EX", OTP_TTL_SECONDS)
+        .set(rateLimitKey, "1", "EX", RATE_LIMIT_SECONDS)
+        .exec();
+    } else {
+      saveToMemory(email, otpHash);
     }
-
-    // Verified successfully -> invalidate OTP immediately
-    await this.invalidateOtp(email, usingRedis);
-
-    return {
-      success: true,
-      message: "OTP verified successfully",
-    };
+  } catch (err) {
+    console.warn("⚠️ Redis unavailable for OTP, using in-memory store:", (err as Error).message);
+    saveToMemory(email, otpHash);
   }
 
-  private saveToMemory(email: string, otpHash: string) {
-    memoryOtpCache.set(email, {
-      hash: otpHash,
-      attempts: 0,
-      expiresAt: Date.now() + this.OTP_TTL_SECONDS * 1000,
-    });
-    memoryRateLimitCache.set(email, Date.now() + this.RATE_LIMIT_SECONDS * 1000);
+  // 4. Dispatch Email via Brevo
+  await emailService.sendOtpEmail({
+    toEmail: email,
+    otp: rawOtp,
+    recipientName: input.recipientName,
+    purpose,
+    expiryMinutes: Math.floor(OTP_TTL_SECONDS / 60),
+  });
+
+  const isDevPreview =
+    (process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test") &&
+    process.env.ALLOW_DEV_OTP_PREVIEW === "true" &&
+    (!process.env.BREVO_API_KEY || process.env.BREVO_API_KEY.trim() === "");
+
+  return {
+    success: true,
+    message: `OTP sent successfully to ${email}`,
+    expiresInSeconds: OTP_TTL_SECONDS,
+    ...(isDevPreview ? { previewOtp: rawOtp } : {}),
+  };
+};
+
+/**
+ * Verify an OTP provided by the user
+ */
+export const verifyOtp = async (input: {
+  email: string;
+  otp: string;
+}): Promise<{ success: boolean; message: string }> => {
+  const email = input.email.trim().toLowerCase();
+  const rawOtp = input.otp ? input.otp.trim() : "";
+
+  if (!email || !rawOtp) {
+    throw new AppError("Email and OTP code are required", 400, "VALIDATION_ERROR");
   }
 
-  private async invalidateOtp(email: string, usingRedis: boolean) {
-    const otpKey = redisKeys.emailOtp(email);
+  const otpKey = redisKeys.emailOtp(email);
+  let record: StoredOtpData | null = null;
+  let usingRedis = false;
+
+  try {
+    if (redisClient.status === "ready") {
+      const data = await redisClient.get(otpKey);
+      if (data) {
+        record = JSON.parse(data);
+        usingRedis = true;
+      }
+    }
+  } catch (err) {
+    console.warn("⚠️ Redis fetch error during OTP verification:", (err as Error).message);
+  }
+
+  // Check memory store if not found in Redis
+  if (!record) {
+    const memoryRecord = memoryOtpCache.get(email);
+    if (memoryRecord && memoryRecord.expiresAt > Date.now()) {
+      record = memoryRecord;
+    }
+  }
+
+  if (!record) {
+    throw new AppError("OTP has expired or was not requested", 400, "OTP_EXPIRED_OR_INVALID");
+  }
+
+  // Check attempt threshold to prevent brute-force attacks
+  if (record.attempts >= MAX_ATTEMPTS) {
+    await invalidateOtp(email, usingRedis);
+    throw new AppError(
+      "Too many failed attempts. This OTP is now invalid. Please request a new one.",
+      429,
+      "OTP_MAX_ATTEMPTS_EXCEEDED"
+    );
+  }
+
+  const providedHash = hashOtp(rawOtp);
+  const isMatch = crypto.timingSafeEqual(
+    Buffer.from(record.hash, "hex"),
+    Buffer.from(providedHash, "hex")
+  );
+
+  if (!isMatch) {
+    // Increment attempt counter
+    record.attempts += 1;
     if (usingRedis) {
       try {
-        await redisClient.del(otpKey);
+        const remainingTtl = await redisClient.ttl(otpKey);
+        if (remainingTtl > 0) {
+          await redisClient.set(otpKey, JSON.stringify(record), "EX", remainingTtl);
+        }
       } catch {
-        // ignore
+        // ignore error
       }
+    } else {
+      memoryOtpCache.set(email, record);
     }
-    memoryOtpCache.delete(email);
-  }
-}
 
-export const otpService = new OtpService();
+    const attemptsLeft = MAX_ATTEMPTS - record.attempts;
+    throw new AppError(
+      `Invalid OTP code. ${attemptsLeft} attempt(s) remaining.`,
+      400,
+      "INVALID_OTP"
+    );
+  }
+
+  // Verified successfully -> invalidate OTP immediately
+  await invalidateOtp(email, usingRedis);
+
+  return {
+    success: true,
+    message: "OTP verified successfully",
+  };
+};
+
+export const otpService = {
+  sendOtp,
+  verifyOtp,
+};
+
+export type OtpService = typeof otpService;
+
+export const OtpService = function (this: unknown) {
+  return otpService;
+} as unknown as {
+  new (): typeof otpService;
+  sendOtp: typeof sendOtp;
+  verifyOtp: typeof verifyOtp;
+};
+

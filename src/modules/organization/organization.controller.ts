@@ -183,6 +183,20 @@ export const createOrganizationController = (deps: {
           country: true,
           timezone: true,
           status: true,
+          locations: {
+            where: {
+              status: "ACTIVE",
+              deletedAt: null,
+            },
+            select: {
+              id: true,
+              name: true,
+              code: true,
+              address: true,
+              phone: true,
+            },
+            take: 5,
+          },
           _count: {
             select: {
               locations: true,
@@ -192,9 +206,48 @@ export const createOrganizationController = (deps: {
         },
         orderBy: { name: "asc" },
       });
+
+      const formatted = list.map((tenant) => {
+        const locations = (tenant.locations || []).map((loc) => {
+          const addr =
+            typeof loc.address === "object" && loc.address !== null
+              ? (loc.address as Record<string, any>)
+              : {};
+          const locality =
+            addr.locality ||
+            addr.suburb ||
+            addr.neighbourhood ||
+            addr.city ||
+            (typeof loc.address === "string" ? loc.address : undefined);
+          const city = addr.city || addr.state_district || addr.district || "Kolkata";
+          const latitude = typeof addr.latitude === "number" ? addr.latitude : undefined;
+          const longitude = typeof addr.longitude === "number" ? addr.longitude : undefined;
+
+          return {
+            ...loc,
+            locality,
+            city,
+            latitude,
+            longitude,
+          };
+        });
+
+        const primaryLoc = locations[0];
+
+        return {
+          ...tenant,
+          locations,
+          locality: primaryLoc?.locality,
+          city: primaryLoc?.city,
+          latitude: primaryLoc?.latitude,
+          longitude: primaryLoc?.longitude,
+          primaryBranch: primaryLoc,
+        };
+      });
+
       res.status(200).json({
         success: true,
-        data: list,
+        data: formatted,
       });
     } catch (error) {
       next(error);

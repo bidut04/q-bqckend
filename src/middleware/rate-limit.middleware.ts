@@ -37,3 +37,10 @@ export const publicBookingRateLimiter = rateLimit({
     message: "Too many booking requests from this IP. Please try again later.",
   },
 });
+
+export {
+  createSlidingRateLimiter,
+  publicBookingSlidingLimiter,
+  apiGatewaySlidingLimiter,
+} from "./sliding-rate-limiter";
+

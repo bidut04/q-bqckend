@@ -45,11 +45,14 @@ export const createFormRepository = () => {
 
 export type FormRepository = ReturnType<typeof createFormRepository>;
 
-export class FormRepositoryAdapter {
-  private repo = createFormRepository();
-  findFormById = this.repo.findFormById;
-  findPublishedFormForBranchAndService = this.repo.findPublishedFormForBranchAndService;
-}
+export const createFormRepositoryAdapter = () => createFormRepository();
+
+export const FormRepositoryAdapter = function (this: unknown) {
+  return createFormRepository();
+} as unknown as {
+  new (): ReturnType<typeof createFormRepository>;
+};
 
 export const FormRepository = FormRepositoryAdapter as unknown as typeof FormRepositoryAdapter &
   typeof createFormRepository;
+

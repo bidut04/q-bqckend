@@ -35,12 +35,15 @@ export const createLocationRepository = createBranchRepository;
 export type BranchRepository = ReturnType<typeof createBranchRepository>;
 export type LocationRepository = BranchRepository;
 
-export class BranchRepositoryAdapter {
-  private repo = createBranchRepository();
-  findById = this.repo.findById;
-  findAllForTenant = this.repo.findAllForTenant;
-}
+export const createBranchRepositoryAdapter = () => createBranchRepository();
+
+export const BranchRepositoryAdapter = function (this: unknown) {
+  return createBranchRepository();
+} as unknown as {
+  new (): ReturnType<typeof createBranchRepository>;
+};
 
 export const BranchRepository = BranchRepositoryAdapter as unknown as typeof BranchRepositoryAdapter &
   typeof createBranchRepository;
+
 export const LocationRepository = BranchRepository;

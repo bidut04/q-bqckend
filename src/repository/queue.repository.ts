@@ -172,17 +172,16 @@ export const createQueueRepository = () => {
 
 export type QueueRepository = ReturnType<typeof createQueueRepository>;
 
-export class QueueRepositoryAdapter {
-  private repo = createQueueRepository();
-  findEntryById = this.repo.findEntryById;
-  findActiveByBranch = this.repo.findActiveByBranch;
-  findPolicyForQueue = this.repo.findPolicyForQueue;
-  upsertPolicyForQueue = this.repo.upsertPolicyForQueue;
-  updateEntryStatus = this.repo.updateEntryStatus;
-  requeueEntry = this.repo.requeueEntry;
-}
+export const createQueueRepositoryAdapter = () => createQueueRepository();
+
+export const QueueRepositoryAdapter = function (this: unknown) {
+  return createQueueRepository();
+} as unknown as {
+  new (): ReturnType<typeof createQueueRepository>;
+};
 
 export const QueueRepository = QueueRepositoryAdapter as unknown as typeof QueueRepositoryAdapter &
   typeof createQueueRepository;
+
 
 

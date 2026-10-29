@@ -27,8 +27,11 @@ export interface RealtimeEnvelope<T = unknown> {
   tenantId: string;
   branchId?: string;
   occurredAt: string;
+  traceId?: string;
+  spanId?: string;
   payload: T;
 }
+
 
 export interface DisplayCallPayload {
   queueEntryId: string;

@@ -11,20 +11,18 @@ import {
   EmployeeFilterQuery,
 } from "./employee.types";
 
-export class EmployeeService {
-  constructor(private readonly employeeRepo: EmployeeRepository) {}
-
-  public async getEmployees(context: TenantContext, query: EmployeeFilterQuery) {
+export const createEmployeeService = (employeeRepo: EmployeeRepository) => {
+  const getEmployees = async (context: TenantContext, query: EmployeeFilterQuery) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_READ);
-    return this.employeeRepo.findMany(context, query);
-  }
+    return employeeRepo.findMany(context, query);
+  };
 
-  public async getEmployeeById(context: TenantContext, id: string) {
+  const getEmployeeById = async (context: TenantContext, id: string) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_READ);
-    return this.employeeRepo.findById(context, id);
-  }
+    return employeeRepo.findById(context, id);
+  };
 
-  public async createEmployee(context: TenantContext, data: CreateEmployeeDTO) {
+  const createEmployee = async (context: TenantContext, data: CreateEmployeeDTO) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_CREATE);
 
     // If initial branch assignment specified, verify branch authorization
@@ -40,80 +38,105 @@ export class EmployeeService {
       Authorizer.authorize(context, Permission.ROLE_ASSIGN);
     }
 
-    return this.employeeRepo.create(context, data);
-  }
+    return employeeRepo.create(context, data);
+  };
 
-  public async updateEmployee(context: TenantContext, id: string, data: UpdateEmployeeDTO) {
+  const updateEmployee = async (context: TenantContext, id: string, data: UpdateEmployeeDTO) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
-    return this.employeeRepo.update(context, id, data);
-  }
+    return employeeRepo.update(context, id, data);
+  };
 
-  public async deleteEmployee(context: TenantContext, id: string) {
+  const deleteEmployee = async (context: TenantContext, id: string) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_DELETE);
-    return this.employeeRepo.delete(context, id);
-  }
+    return employeeRepo.delete(context, id);
+  };
 
-  public async assignBranch(context: TenantContext, employeeId: string, data: AssignBranchDTO) {
+  const assignBranch = async (context: TenantContext, employeeId: string, data: AssignBranchDTO) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
     Authorizer.authorize(context, Permission.BRANCH_UPDATE, {
       tenantId: context.tenantId,
       branchId: data.locationId,
     });
-    return this.employeeRepo.assignBranch(context, employeeId, data.locationId, data.isPrimary);
-  }
+    return employeeRepo.assignBranch(context, employeeId, data.locationId, data.isPrimary);
+  };
 
-  public async removeBranch(context: TenantContext, employeeId: string, locationId: string) {
+  const removeBranch = async (context: TenantContext, employeeId: string, locationId: string) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
     Authorizer.authorize(context, Permission.BRANCH_UPDATE, {
       tenantId: context.tenantId,
       branchId: locationId,
     });
-    return this.employeeRepo.removeBranch(context, employeeId, locationId);
-  }
+    return employeeRepo.removeBranch(context, employeeId, locationId);
+  };
 
-  public async assignService(context: TenantContext, employeeId: string, data: AssignServiceDTO) {
+  const assignService = async (context: TenantContext, employeeId: string, data: AssignServiceDTO) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
     Authorizer.authorize(context, Permission.BRANCH_UPDATE, {
       tenantId: context.tenantId,
       branchId: data.locationId,
     });
-    return this.employeeRepo.assignService(context, employeeId, data.locationId, data.serviceId);
-  }
+    return employeeRepo.assignService(context, employeeId, data.locationId, data.serviceId);
+  };
 
-  public async removeService(
+  const removeService = async (
     context: TenantContext,
     employeeId: string,
     locationId: string,
     serviceId: string
-  ) {
+  ) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
     Authorizer.authorize(context, Permission.BRANCH_UPDATE, {
       tenantId: context.tenantId,
       branchId: locationId,
     });
-    return this.employeeRepo.removeService(context, employeeId, locationId, serviceId);
-  }
+    return employeeRepo.removeService(context, employeeId, locationId, serviceId);
+  };
 
-  public async assignRole(context: TenantContext, employeeId: string, data: AssignRoleDTO) {
+  const assignRole = async (context: TenantContext, employeeId: string, data: AssignRoleDTO) => {
     Authorizer.authorize(context, Permission.ROLE_ASSIGN);
-    return this.employeeRepo.assignRole(context, employeeId, data.roleId);
-  }
+    return employeeRepo.assignRole(context, employeeId, data.roleId);
+  };
 
-  public async removeRole(context: TenantContext, employeeId: string, roleId: string) {
+  const removeRole = async (context: TenantContext, employeeId: string, roleId: string) => {
     Authorizer.authorize(context, Permission.ROLE_ASSIGN);
-    return this.employeeRepo.removeRole(context, employeeId, roleId);
-  }
+    return employeeRepo.removeRole(context, employeeId, roleId);
+  };
 
-  public async assignCounter(context: TenantContext, employeeId: string, counterId: string) {
+  const assignCounter = async (context: TenantContext, employeeId: string, counterId: string) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
     Authorizer.authorize(context, Permission.COUNTER_UPDATE);
-    return this.employeeRepo.assignCounter(context, employeeId, counterId);
-  }
+    return employeeRepo.assignCounter(context, employeeId, counterId);
+  };
 
-  public async removeCounter(context: TenantContext, employeeId: string, counterId: string) {
+  const removeCounter = async (context: TenantContext, employeeId: string, counterId: string) => {
     Authorizer.authorize(context, Permission.EMPLOYEE_UPDATE);
     Authorizer.authorize(context, Permission.COUNTER_UPDATE);
-    return this.employeeRepo.removeCounter(context, employeeId, counterId);
-  }
-}
+    return employeeRepo.removeCounter(context, employeeId, counterId);
+  };
+
+  return {
+    getEmployees,
+    getEmployeeById,
+    createEmployee,
+    updateEmployee,
+    deleteEmployee,
+    assignBranch,
+    removeBranch,
+    assignService,
+    removeService,
+    assignRole,
+    removeRole,
+    assignCounter,
+    removeCounter,
+  };
+};
+
+export type EmployeeService = ReturnType<typeof createEmployeeService>;
+
+export const EmployeeService = function (this: unknown, employeeRepo: EmployeeRepository) {
+  return createEmployeeService(employeeRepo);
+} as unknown as {
+  new (employeeRepo: EmployeeRepository): ReturnType<typeof createEmployeeService>;
+};
+
 

@@ -183,16 +183,15 @@ export const createBookingRepository = () => {
 
 export type BookingRepository = ReturnType<typeof createBookingRepository>;
 
-export class BookingRepositoryAdapter {
-  private repo = createBookingRepository();
-  findById = this.repo.findById;
-  findAll = this.repo.findAll;
-  findByBranch = this.repo.findByBranch;
-  createBooking = this.repo.createBooking;
-  updateStatus = this.repo.updateStatus;
-  checkInAndCreateQueueEntry = this.repo.checkInAndCreateQueueEntry;
-}
+export const createBookingRepositoryAdapter = () => createBookingRepository();
+
+export const BookingRepositoryAdapter = function (this: unknown) {
+  return createBookingRepository();
+} as unknown as {
+  new (): ReturnType<typeof createBookingRepository>;
+};
 
 export const BookingRepository = BookingRepositoryAdapter as unknown as typeof BookingRepositoryAdapter &
   typeof createBookingRepository;
+
 

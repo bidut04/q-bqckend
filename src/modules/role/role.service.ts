@@ -10,59 +10,57 @@ import {
   CheckPermissionsQuery,
 } from "./role.types";
 
-export class RoleService {
-  constructor(private readonly roleRepo: RoleRepository) {}
-
-  public async getRoles(context: TenantContext) {
+export const createRoleService = (roleRepo: RoleRepository) => {
+  const getRoles = async (context: TenantContext) => {
     Authorizer.authorize(context, Permission.ROLE_READ);
-    return this.roleRepo.findRoles(context);
-  }
+    return roleRepo.findRoles(context);
+  };
 
-  public async getRoleById(context: TenantContext, id: string) {
+  const getRoleById = async (context: TenantContext, id: string) => {
     Authorizer.authorize(context, Permission.ROLE_READ);
-    return this.roleRepo.findRoleById(context, id);
-  }
+    return roleRepo.findRoleById(context, id);
+  };
 
-  public async createRole(context: TenantContext, data: CreateRoleDTO) {
+  const createRole = async (context: TenantContext, data: CreateRoleDTO) => {
     Authorizer.authorize(context, Permission.ROLE_CREATE);
-    return this.roleRepo.createRole(context, data);
-  }
+    return roleRepo.createRole(context, data);
+  };
 
-  public async updateRole(context: TenantContext, id: string, data: UpdateRoleDTO) {
+  const updateRole = async (context: TenantContext, id: string, data: UpdateRoleDTO) => {
     Authorizer.authorize(context, Permission.ROLE_UPDATE);
-    return this.roleRepo.updateRole(context, id, data);
-  }
+    return roleRepo.updateRole(context, id, data);
+  };
 
-  public async deleteRole(context: TenantContext, id: string) {
+  const deleteRole = async (context: TenantContext, id: string) => {
     Authorizer.authorize(context, Permission.ROLE_DELETE);
-    return this.roleRepo.deleteRole(context, id);
-  }
+    return roleRepo.deleteRole(context, id);
+  };
 
-  public async assignPermission(
+  const assignPermission = async (
     context: TenantContext,
     roleId: string,
     data: AssignPermissionDTO
-  ) {
+  ) => {
     Authorizer.authorize(context, Permission.ROLE_UPDATE);
-    return this.roleRepo.assignPermissionToRole(context, roleId, data.permissionKey);
-  }
+    return roleRepo.assignPermissionToRole(context, roleId, data.permissionKey);
+  };
 
-  public async removePermission(
+  const removePermission = async (
     context: TenantContext,
     roleId: string,
     permissionKey: string
-  ) {
+  ) => {
     Authorizer.authorize(context, Permission.ROLE_UPDATE);
-    return this.roleRepo.removePermissionFromRole(context, roleId, permissionKey);
-  }
+    return roleRepo.removePermissionFromRole(context, roleId, permissionKey);
+  };
 
   // Scoped Role Assignments (Hybrid RBAC)
-  public async assignScopedRole(
+  const assignScopedRole = async (
     context: TenantContext,
     data: ScopedRoleAssignmentDTO
-  ) {
+  ) => {
     Authorizer.authorize(context, Permission.ROLE_ASSIGN);
-    return this.roleRepo.assignScopedRole(context, {
+    return roleRepo.assignScopedRole(context, {
       userId: data.userId,
       roleId: data.roleId,
       scopeType: data.scopeType,
@@ -70,32 +68,56 @@ export class RoleService {
       grantedById: context.userId,
       expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
     });
-  }
+  };
 
-  public async removeScopedRole(context: TenantContext, assignmentId: string) {
+  const removeScopedRole = async (context: TenantContext, assignmentId: string) => {
     Authorizer.authorize(context, Permission.ROLE_ASSIGN);
-    return this.roleRepo.removeScopedRole(context, assignmentId);
-  }
+    return roleRepo.removeScopedRole(context, assignmentId);
+  };
 
-  public async getUserRoleAssignments(context: TenantContext, userId: string) {
+  const getUserRoleAssignments = async (context: TenantContext, userId: string) => {
     Authorizer.authorize(context, Permission.ROLE_READ);
-    return this.roleRepo.getUserRoleAssignments(context, userId);
-  }
+    return roleRepo.getUserRoleAssignments(context, userId);
+  };
 
-  public async getEffectivePermissions(
+  const getEffectivePermissions = async (
     context: TenantContext,
     query: CheckPermissionsQuery
-  ) {
+  ) => {
     Authorizer.authorize(context, Permission.ROLE_READ);
-    return this.roleRepo.getEffectiveUserPermissions(
+    return roleRepo.getEffectiveUserPermissions(
       context,
       query.userId,
       query.scopeType ? { scopeType: query.scopeType, scopeId: query.scopeId } : undefined
     );
-  }
+  };
 
-  public async getAvailablePermissions(context: TenantContext) {
+  const getAvailablePermissions = async (context: TenantContext) => {
     Authorizer.authorize(context, Permission.ROLE_READ);
     return Object.values(Permission);
-  }
-}
+  };
+
+  return {
+    getRoles,
+    getRoleById,
+    createRole,
+    updateRole,
+    deleteRole,
+    assignPermission,
+    removePermission,
+    assignScopedRole,
+    removeScopedRole,
+    getUserRoleAssignments,
+    getEffectivePermissions,
+    getAvailablePermissions,
+  };
+};
+
+export type RoleService = ReturnType<typeof createRoleService>;
+
+export const RoleService = function (this: unknown, roleRepo: RoleRepository) {
+  return createRoleService(roleRepo);
+} as unknown as {
+  new (roleRepo: RoleRepository): ReturnType<typeof createRoleService>;
+};
+

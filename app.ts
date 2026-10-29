@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 
 import { env, isProduction } from "./src/config/env";
 import { globalRateLimiter } from "./src/middleware/rate-limit.middleware";
+import { tracingMiddleware } from "./src/lib/tracing/tracing.middleware";
 import { notFoundMiddleware } from "./src/middleware/not-found.middleware";
 import { errorMiddleware } from "./src/middleware/error.middleware";
 import { tenantShardingMiddleware } from "./src/middleware/tenant.middleware";
@@ -12,6 +13,13 @@ import { shardManager } from "./src/lib/sharding/shard.manager";
 import { apiRouter } from "./src/routes";
 
 export const app = express();
+
+// ============================================================
+// OPENTELEMETRY DISTRIBUTED TRACING
+// ============================================================
+
+app.use(tracingMiddleware);
+
 
 // ============================================================
 // TRUST PROXY
@@ -94,9 +102,13 @@ app.use(
       "X-Request-ID",
       "X-Tenant-ID",
       "X-Tenant",
+      "X-API-Key",
+      "traceparent",
+      "X-Trace-ID",
     ],
   })
 );
+
 
 // ============================================================
 // BODY PARSING & COOKIE PARSER

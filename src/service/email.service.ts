@@ -10,26 +10,25 @@ export interface SendOtpEmailOptions {
   expiryMinutes?: number;
 }
 
-export class BrevoEmailService {
-  private getSenderEmail(): string {
-    return (process.env.BREVO_SENDER_EMAIL || env.BREVO_SENDER_EMAIL || "").trim();
-  }
+const getSenderEmail = (): string => {
+  return (process.env.BREVO_SENDER_EMAIL || env.BREVO_SENDER_EMAIL || "").trim();
+};
 
-  private getSenderName(): string {
-    return (process.env.BREVO_SENDER_NAME || env.BREVO_SENDER_NAME || "ePaper Verification").trim();
-  }
+const getSenderName = (): string => {
+  return (process.env.BREVO_SENDER_NAME || env.BREVO_SENDER_NAME || "ePaper Verification").trim();
+};
 
-  private getClient(): BrevoClient | null {
-    const key = (process.env.BREVO_API_KEY || env.BREVO_API_KEY || "").trim();
-    if (!key) return null;
-    return new BrevoClient({ apiKey: key });
-  }
+const getClient = (): BrevoClient | null => {
+  const key = (process.env.BREVO_API_KEY || env.BREVO_API_KEY || "").trim();
+  if (!key) return null;
+  return new BrevoClient({ apiKey: key });
+};
 
-  /**
-   * Generates a modern, clean HTML template for the OTP email
-   */
-  private buildOtpTemplate(otp: string, purpose: string, expiryMinutes: number): string {
-    return `
+/**
+ * Generates a modern, clean HTML template for the OTP email
+ */
+const buildOtpTemplate = (otp: string, purpose: string, expiryMinutes: number): string => {
+  return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -140,89 +139,89 @@ export class BrevoEmailService {
   </div>
 </body>
 </html>
-    `.trim();
+  `.trim();
+};
+
+/**
+ * Send OTP Email via Brevo Transactional Email API
+ */
+export const sendOtpEmail = async (options: SendOtpEmailOptions): Promise<{ success: boolean; messageId?: string }> => {
+  const { toEmail, otp, recipientName, purpose = "Verification", expiryMinutes = 5 } = options;
+
+  const client = getClient();
+  const senderEmail = getSenderEmail();
+  const senderName = getSenderName();
+
+  // Local development fallback when BREVO_API_KEY is not configured
+  if (!client) {
+    console.log("=================================================");
+    console.log("📨 [DEV EMAIL SANDBOX] BREVO_API_KEY not configured");
+    console.log(`To: ${toEmail}`);
+    console.log(`Purpose: ${purpose}`);
+    console.log(`🔐 OTP CODE: ${otp} (Valid for ${expiryMinutes}m)`);
+    console.log("Set BREVO_API_KEY in .env to deliver real emails.");
+    console.log("=================================================");
+    return { success: true, messageId: "dev-sandbox-mode" };
   }
 
-  /**
-   * Send OTP Email via Brevo Transactional Email API
-   */
-  public async sendOtpEmail(options: SendOtpEmailOptions): Promise<{ success: boolean; messageId?: string }> {
-    const { toEmail, otp, recipientName, purpose = "Verification", expiryMinutes = 5 } = options;
+  try {
+    const htmlContent = buildOtpTemplate(otp, purpose, expiryMinutes);
+    const subject = `${otp} is your ${purpose} verification code`;
 
-    const client = this.getClient();
-    const senderEmail = this.getSenderEmail();
-    const senderName = this.getSenderName();
-
-    // Local development fallback when BREVO_API_KEY is not configured
-    if (!client) {
-      console.log("=================================================");
-      console.log("📨 [DEV EMAIL SANDBOX] BREVO_API_KEY not configured");
-      console.log(`To: ${toEmail}`);
-      console.log(`Purpose: ${purpose}`);
-      console.log(`🔐 OTP CODE: ${otp} (Valid for ${expiryMinutes}m)`);
-      console.log("Set BREVO_API_KEY in .env to deliver real emails.");
-      console.log("=================================================");
-      return { success: true, messageId: "dev-sandbox-mode" };
-    }
-
-    try {
-      const htmlContent = this.buildOtpTemplate(otp, purpose, expiryMinutes);
-      const subject = `${otp} is your ${purpose} verification code`;
-
-      const response = await client.transactionalEmails.sendTransacEmail({
-        sender: {
-          email: senderEmail,
-          name: senderName,
+    const response = await client.transactionalEmails.sendTransacEmail({
+      sender: {
+        email: senderEmail,
+        name: senderName,
+      },
+      to: [
+        {
+          email: toEmail,
+          name: recipientName || toEmail,
         },
-        to: [
-          {
-            email: toEmail,
-            name: recipientName || toEmail,
-          },
-        ],
-        subject,
-        htmlContent,
-      });
+      ],
+      subject,
+      htmlContent,
+    });
 
-      const messageId = (response as any)?.messageId || "sent";
-      console.log(`✅ [Brevo] OTP Email delivered to ${toEmail} (ID: ${messageId})`);
-      return { success: true, messageId };
-    } catch (error: any) {
-      console.error("❌ [Brevo] Failed to send email via Brevo:", error?.message || error);
-      throw new AppError(
-        `Failed to send verification email: ${error?.message || "Brevo provider error"}`,
-        502,
-        "EMAIL_DELIVERY_FAILED"
-      );
-    }
+    const messageId = (response as any)?.messageId || "sent";
+    console.log(`✅ [Brevo] OTP Email delivered to ${toEmail} (ID: ${messageId})`);
+    return { success: true, messageId };
+  } catch (error: any) {
+    console.error("❌ [Brevo] Failed to send email via Brevo:", error?.message || error);
+    throw new AppError(
+      `Failed to send verification email: ${error?.message || "Brevo provider error"}`,
+      502,
+      "EMAIL_DELIVERY_FAILED"
+    );
+  }
+};
+
+/**
+ * Send Generic / Status Notification Email via Brevo API
+ */
+export const sendNotificationEmail = async (options: {
+  toEmail: string;
+  recipientName?: string;
+  subject: string;
+  title: string;
+  messageHtml: string;
+}): Promise<{ success: boolean; messageId?: string }> => {
+  const { toEmail, recipientName, subject, title, messageHtml } = options;
+  const client = getClient();
+  const senderEmail = getSenderEmail();
+  const senderName = getSenderName();
+
+  if (!client) {
+    console.log("=================================================");
+    console.log("📨 [DEV EMAIL SANDBOX] BREVO_API_KEY not configured");
+    console.log(`To: ${toEmail} (${recipientName || "Admin"})`);
+    console.log(`Subject: ${subject}`);
+    console.log("=================================================");
+    return { success: true, messageId: "dev-sandbox-mode" };
   }
 
-  /**
-   * Send Generic / Status Notification Email via Brevo API
-   */
-  public async sendNotificationEmail(options: {
-    toEmail: string;
-    recipientName?: string;
-    subject: string;
-    title: string;
-    messageHtml: string;
-  }): Promise<{ success: boolean; messageId?: string }> {
-    const { toEmail, recipientName, subject, title, messageHtml } = options;
-    const client = this.getClient();
-    const senderEmail = this.getSenderEmail();
-    const senderName = this.getSenderName();
-
-    if (!client) {
-      console.log("=================================================");
-      console.log("📨 [DEV EMAIL SANDBOX] BREVO_API_KEY not configured");
-      console.log(`To: ${toEmail} (${recipientName || "Admin"})`);
-      console.log(`Subject: ${subject}`);
-      console.log("=================================================");
-      return { success: true, messageId: "dev-sandbox-mode" };
-    }
-
-    try {
-      const htmlContent = `
+  try {
+    const htmlContent = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -251,35 +250,48 @@ export class BrevoEmailService {
   </div>
 </body>
 </html>
-      `.trim();
+    `.trim();
 
-      const response = await client.transactionalEmails.sendTransacEmail({
-        sender: {
-          email: senderEmail,
-          name: senderName,
+    const response = await client.transactionalEmails.sendTransacEmail({
+      sender: {
+        email: senderEmail,
+        name: senderName,
+      },
+      to: [
+        {
+          email: toEmail,
+          name: recipientName || toEmail,
         },
-        to: [
-          {
-            email: toEmail,
-            name: recipientName || toEmail,
-          },
-        ],
-        subject,
-        htmlContent,
-      });
+      ],
+      subject,
+      htmlContent,
+    });
 
-      const messageId = (response as any)?.messageId || "sent";
-      console.log(`✅ [Brevo] Notification Email delivered to ${toEmail} (ID: ${messageId})`);
-      return { success: true, messageId };
-    } catch (error: any) {
-      console.error("❌ [Brevo] Failed to send email via Brevo:", error?.message || error);
-      throw new AppError(
-        `Failed to send notification email: ${error?.message || "Brevo provider error"}`,
-        502,
-        "EMAIL_DELIVERY_FAILED"
-      );
-    }
+    const messageId = (response as any)?.messageId || "sent";
+    console.log(`✅ [Brevo] Notification Email delivered to ${toEmail} (ID: ${messageId})`);
+    return { success: true, messageId };
+  } catch (error: any) {
+    console.error("❌ [Brevo] Failed to send email via Brevo:", error?.message || error);
+    throw new AppError(
+      `Failed to send notification email: ${error?.message || "Brevo provider error"}`,
+      502,
+      "EMAIL_DELIVERY_FAILED"
+    );
   }
-}
+};
 
-export const emailService = new BrevoEmailService();
+export const emailService = {
+  sendOtpEmail,
+  sendNotificationEmail,
+};
+
+export type BrevoEmailService = typeof emailService;
+
+export const BrevoEmailService = function (this: unknown) {
+  return emailService;
+} as unknown as {
+  new (): typeof emailService;
+  sendOtpEmail: typeof sendOtpEmail;
+  sendNotificationEmail: typeof sendNotificationEmail;
+};
+
