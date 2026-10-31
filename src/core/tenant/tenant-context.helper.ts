@@ -3,55 +3,72 @@ import { TenantContext } from "./tenant-context";
 import { getDefaultPermissionsForRole, Permission } from "../authorization/permissions";
 
 export const getTenantContextFromRequest = (req: Request): TenantContext => {
-  const headerTenantId = (req.headers["x-tenant-id"] || req.headers["x-tenant"]) as string | undefined;
+  const rawHeaderTenantId = req.headers["x-tenant-id"] ?? req.headers["x-tenant"];
+  const headerTenantId = typeof rawHeaderTenantId === "string" ? rawHeaderTenantId.trim() : undefined;
+
   const user = req.user;
-  const rawRole = (user?.role || "USER") as string;
+  const isPlatformAdmin = user?.isSuperAdmin === true;
+  const rawRole = (user?.role as string) ?? "USER";
 
-  // Platform admin check: only platform super-admins can switch tenants via header
-  const isPlatformAdmin =
-    user?.isSuperAdmin === true ||
-    rawRole === "ADMIN" ||
-    rawRole === "PLATFORM_OWNER" ||
-    rawRole === "PLATFORM_SUPER_ADMIN";
-
-  let tenantId: string;
+  let tenantId = "";
   if (user) {
     if (isPlatformAdmin) {
-      tenantId = headerTenantId || user.tenantId || req.tenantId || "default-tenant";
+      if (headerTenantId) {
+        tenantId = headerTenantId;
+      } else if (user.tenantId) {
+        tenantId = user.tenantId;
+      } else if (req.tenantId) {
+        tenantId = req.tenantId;
+      }
     } else {
-      // Non-platform admin: strictly trust verified user tenant context or route-bound tenantId.
-      // Untrusted x-tenant-id headers from client requests are ignored to prevent tenant isolation bypass.
-      tenantId = user.tenantId || req.tenantId || "default-tenant";
+      if (user.tenantId) {
+        tenantId = user.tenantId;
+      } else if (headerTenantId) {
+        tenantId = headerTenantId;
+      } else if (req.tenantId) {
+        tenantId = req.tenantId;
+      }
     }
   } else {
-    // Unauthenticated/public request (e.g. discovery or public queue view)
-    tenantId = req.tenantId || headerTenantId || "default-tenant";
+    if (headerTenantId) {
+      tenantId = headerTenantId;
+    } else if (req.tenantId) {
+      tenantId = req.tenantId;
+    }
   }
 
-  const headerBranchId = (req.headers["x-branch-id"] || req.headers["x-branch"]) as string | undefined;
-  const branchIds = isPlatformAdmin && headerBranchId
-    ? [headerBranchId]
-    : (user as any)?.branchIds?.length
-    ? (user as any).branchIds
-    : headerBranchId
-    ? [headerBranchId]
-    : [];
+  const rawHeaderBranchId = req.headers["x-branch-id"] ?? req.headers["x-branch"];
+  const headerBranchId = typeof rawHeaderBranchId === "string" ? rawHeaderBranchId.trim() : undefined;
 
-  const rawPermissions = (user as any)?.permissions || [];
+  const userBranchIds = Array.isArray((user as any)?.branchIds) ? (user as any).branchIds : [];
+
+  let branchIds: string[] = [];
+  if (isPlatformAdmin && headerBranchId) {
+    branchIds = [headerBranchId];
+  } else if (userBranchIds.length > 0) {
+    branchIds = userBranchIds;
+  } else if (headerBranchId) {
+    branchIds = [headerBranchId];
+  }
+
+  const rawPermissions = Array.isArray((user as any)?.permissions) ? (user as any).permissions : [];
   const permissions: Permission[] =
     rawPermissions.length > 0
       ? (rawPermissions as Permission[])
       : getDefaultPermissionsForRole(rawRole);
 
+  const actorUserId = user?.id ? user.id : "anonymous";
+  const actorSessionId = user?.sessionId ? user.sessionId : "default-session";
+  const actorSecurityVersion = typeof user?.securityVersion === "number" ? user.securityVersion : 1;
+
   return {
-    userId: user?.id || "anonymous",
+    userId: actorUserId,
     tenantId,
     roleIds: [rawRole],
     permissions,
     branchIds,
-    sessionId: user?.sessionId || "default-session",
-    securityVersion: user?.securityVersion || 1,
+    sessionId: actorSessionId,
+    securityVersion: actorSecurityVersion,
     shardId: req.shardId,
   };
 };
-

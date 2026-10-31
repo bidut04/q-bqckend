@@ -31,3 +31,26 @@ export const checkPermissionsQuerySchema = z.object({
   scopeType: z.nativeEnum(ScopeType).optional(),
   scopeId: z.string().optional(),
 });
+
+export const modulePermissionRowSchema = z.object({
+  id: z.string(),
+  module: z.string(),
+  description: z.string().optional(),
+  create: z.boolean(),
+  read: z.boolean(),
+  update: z.boolean(),
+  delete: z.boolean(),
+  copy: z.boolean().optional().default(true),
+  excel: z.boolean().optional().default(true),
+  print: z.boolean().optional().default(true),
+  pdf: z.boolean().optional().default(true),
+});
+
+export const savePermissionsMatrixSchema = z.object({
+  roleId: z.string().optional(),
+  modules: z.array(modulePermissionRowSchema),
+});
+
+export const getPermissionsMatrixQuerySchema = z.object({
+  roleId: z.string().optional(),
+});

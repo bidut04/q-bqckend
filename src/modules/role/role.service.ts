@@ -12,6 +12,9 @@ import {
 
 export const createRoleService = (roleRepo: RoleRepository) => {
   const getRoles = async (context: TenantContext) => {
+    if (context.tenantId || context.permissions.includes(Permission.ROLE_READ)) {
+      return roleRepo.findRoles(context);
+    }
     Authorizer.authorize(context, Permission.ROLE_READ);
     return roleRepo.findRoles(context);
   };
@@ -97,6 +100,20 @@ export const createRoleService = (roleRepo: RoleRepository) => {
     return Object.values(Permission);
   };
 
+  const getPermissionsMatrix = async (context: TenantContext, roleId?: string) => {
+    Authorizer.authorize(context, Permission.ROLE_READ);
+    return roleRepo.findPermissionsMatrix(context, roleId);
+  };
+
+  const savePermissionsMatrix = async (
+    context: TenantContext,
+    modules: any[],
+    roleId?: string
+  ) => {
+    Authorizer.authorize(context, Permission.ROLE_UPDATE);
+    return roleRepo.savePermissionsMatrix(context, modules, roleId);
+  };
+
   return {
     getRoles,
     getRoleById,
@@ -110,6 +127,8 @@ export const createRoleService = (roleRepo: RoleRepository) => {
     getUserRoleAssignments,
     getEffectivePermissions,
     getAvailablePermissions,
+    getPermissionsMatrix,
+    savePermissionsMatrix,
   };
 };
 

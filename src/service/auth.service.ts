@@ -2,6 +2,7 @@
 
 
 import { AuditAction, RevokeReason, Role } from "@prisma/client";
+import { prisma } from "../config/prisma";
 import { AppError } from "../../utils/app-error";
 import { createAuthRepository } from "../repository/auth.repository";
 import { createUserRepository } from "../repository/user.repository";
@@ -332,10 +333,22 @@ export const createAuthService = (deps: AuthServiceDeps) => {
       throw new AppError("Refresh token reuse detected", 401, "TOKEN_REUSE_DETECTED");
     }
 
+    const authorities = await deps.userRepository.getUserAuthorities(stored.user.id);
+    const isPlatformSuperAdmin = authorities?.platformMember?.status === 'ACTIVE';
+    const tenantMemberships = authorities?.tenantMemberships || [];
+    const isTenantAdmin = tenantMemberships.some(
+      (m: any) => m.adminRole === 'TENANT_OWNER' || m.adminRole === 'TENANT_ADMIN'
+    );
+    const effectiveRole = isPlatformSuperAdmin
+      ? (authorities?.platformMember?.role || 'PLATFORM_OWNER')
+      : isTenantAdmin
+      ? 'TENANT_ADMIN'
+      : stored.user.role;
+
     const accessToken = createAccessToken({
       sub: stored.user.id,
       sid: stored.session.id,
-      role: stored.user.role,
+      role: effectiveRole,
       securityVersion: stored.user.securityVersion,
     });
 
@@ -628,9 +641,35 @@ export const createAuthService = (deps: AuthServiceDeps) => {
       ? "TENANT_ADMIN"
       : user.role;
 
+    let profileMeta: any = null;
+    try {
+      const setting = await prisma.tenantSetting.findFirst({
+        where: { namespace: `profile_${userId}` },
+      });
+      if (setting && setting.value) {
+        profileMeta = setting.value;
+      }
+    } catch {
+      // ignore
+    }
+
+    let employeeName: string | null = null;
+    try {
+      const emp = await prisma.employee.findFirst({
+        where: { OR: [{ userId }, { email: user.email }], deletedAt: null },
+      });
+      if (emp?.name) {
+        employeeName = emp.name;
+      }
+    } catch {
+      // ignore
+    }
+
     return {
       id: user.id,
       email: user.email,
+      name: profileMeta?.name || employeeName || user.email.split("@")[0],
+      avatar: profileMeta?.avatar || null,
       role: effectiveRole,
       userType,
       isSuperAdmin: isPlatformSuperAdmin,
@@ -643,6 +682,77 @@ export const createAuthService = (deps: AuthServiceDeps) => {
     };
   };
 
+  const updateUserProfile = async (
+    userId: string,
+    data: { name?: string; email?: string; avatar?: string }
+  ) => {
+    const user = await deps.userRepository.findById(userId);
+    if (!user) {
+      throw new AppError("User not found", 404, "USER_NOT_FOUND");
+    }
+
+    if (data.email && data.email.trim().toLowerCase() !== user.email.toLowerCase()) {
+      const normalizedEmail = data.email.trim().toLowerCase();
+      const existing = await deps.userRepository.findByEmail(normalizedEmail);
+      if (existing && existing.id !== userId) {
+        throw new AppError("Email is already registered", 409, "EMAIL_ALREADY_EXISTS");
+      }
+      await deps.userRepository.updateUser(userId, { email: normalizedEmail });
+      user.email = normalizedEmail;
+    }
+
+    if (data.name !== undefined || data.avatar !== undefined) {
+      try {
+        const employee = await prisma.employee.findFirst({
+          where: {
+            OR: [{ userId }, { email: user.email }],
+            deletedAt: null,
+          },
+        });
+        if (employee && data.name) {
+          await prisma.employee.update({
+            where: { id: employee.id },
+            data: { name: data.name.trim() },
+          });
+        }
+      } catch {
+        // ignore
+      }
+
+      try {
+        const tenantSetting = await prisma.tenantSetting.findFirst({
+          where: { namespace: `profile_${userId}` },
+        });
+        const currentMeta = (tenantSetting?.value && typeof tenantSetting.value === "object") ? tenantSetting.value : {};
+        const newMeta = {
+          ...currentMeta,
+          ...(data.name !== undefined ? { name: data.name.trim() } : {}),
+          ...(data.avatar !== undefined ? { avatar: data.avatar } : {}),
+          updatedAt: new Date().toISOString(),
+        };
+
+        if (tenantSetting) {
+          await prisma.tenantSetting.update({
+            where: { id: tenantSetting.id },
+            data: { value: newMeta as any },
+          });
+        } else {
+          await prisma.tenantSetting.create({
+            data: {
+              tenantId: "global",
+              namespace: `profile_${userId}`,
+              value: newMeta as any,
+            },
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return await getUserProfile(userId);
+  };
+
   return {
     register,
     login,
@@ -653,6 +763,7 @@ export const createAuthService = (deps: AuthServiceDeps) => {
     getGoogleAuthUrl,
     handleGoogleCallback,
     getUserProfile,
+    updateUserProfile,
   };
 };
 

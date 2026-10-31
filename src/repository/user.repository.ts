@@ -163,10 +163,18 @@ export const createUserRepository = (prisma: PrismaClient) => {
         return user;
     };
 
+    const updateUser = async (userId: string, data: { email?: string; role?: Role }): Promise<User> => {
+        return prisma.user.update({
+            where: { id: userId },
+            data,
+        });
+    };
+
     return {
         findById,
         findByEmail,
         createUser,
+        updateUser,
         updateLastLogin,
         incrementFailedLogin,
         resetFailedLoginAttempts,

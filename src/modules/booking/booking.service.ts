@@ -61,15 +61,25 @@ export const createBookingService = (deps: BookingServiceDeps = {}) => {
 
     const formVersionId = form.publishedVersionId ?? form.versions?.[0]?.id ?? form.id;
 
-    // 5. Create booking scoped to context.tenantId
-    const booking = await bookingRepo.createBooking(context, {
-      branchId: req.branchId,
-      serviceId: req.serviceId,
-      customerId: req.customerId,
-      formVersionId,
-      scheduledAt: req.scheduledAt,
-      notes: req.notes,
-    });
+    // 5. Create booking scoped to context.tenantId with atomic idempotency persistence
+    const booking = await bookingRepo.createBooking(
+      context,
+      {
+        branchId: req.branchId,
+        serviceId: req.serviceId,
+        customerId: req.customerId,
+        formVersionId,
+        scheduledAt: req.scheduledAt,
+        notes: req.notes,
+        idempotencyKey: (req as any).idempotencyKey,
+      },
+      (req as any).idempotencyKey
+        ? {
+            scope: "BOOKING_CREATE",
+            actorId: context.userId || "ANONYMOUS",
+          }
+        : undefined
+    );
 
     // 6. Cache booking in Redis
     await cache.cacheBooking(context.tenantId, booking.id, booking);

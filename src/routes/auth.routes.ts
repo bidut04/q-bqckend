@@ -23,6 +23,8 @@ export const createAuthRouter = (deps: {
 
   // Authenticated user profile
   router.get("/me", requireAuth, deps.authController.getMe);
+  router.patch("/profile", requireAuth, deps.authController.updateProfile);
+  router.put("/profile", requireAuth, deps.authController.updateProfile);
 
   // OTP Routes (Powered by Brevo Email)
   router.post("/send-otp", deps.otpController.sendOtp);

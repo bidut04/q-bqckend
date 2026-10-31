@@ -59,7 +59,12 @@ export const createBookingRepository = () => {
 
   const createBooking = async (
     context: TenantContext,
-    data: CreateBookingData
+    data: CreateBookingData,
+    idempotencyMeta?: {
+      scope?: string;
+      actorId?: string;
+      requestHash?: string;
+    }
   ) => {
     const db = await getTenantDb(context);
     const locationId = data.locationId ?? data.branchId;
@@ -78,19 +83,64 @@ export const createBookingRepository = () => {
     const formVersionId = data.formVersionId ?? crypto.randomUUID();
     const status = data.status ?? BookingStatus.CONFIRMED;
 
-    return db.booking.create({
-      data: {
-        tenantId: context.tenantId,
-        bookingNo,
-        locationId,
-        serviceId: data.serviceId,
-        customerId: data.customerId,
-        scheduledAt: data.scheduledAt,
-        status,
-        formVersionId,
-        idempotencyKey,
-        slotId: data.slotId,
-      },
+    // Atomically write business record and idempotency state in a single transaction
+    return db.$transaction(async (tx) => {
+      const booking = await tx.booking.create({
+        data: {
+          tenantId: context.tenantId,
+          bookingNo,
+          locationId,
+          serviceId: data.serviceId,
+          customerId: data.customerId,
+          scheduledAt: data.scheduledAt,
+          status,
+          formVersionId,
+          idempotencyKey,
+          slotId: data.slotId,
+        },
+      });
+
+      if (data.idempotencyKey || idempotencyMeta) {
+        const scope = idempotencyMeta?.scope || "BOOKING_CREATE";
+        const actorId = idempotencyMeta?.actorId || context.userId || "ANONYMOUS";
+        const requestHash =
+          idempotencyMeta?.requestHash ||
+          crypto.createHash("sha256").update(idempotencyKey).digest("hex");
+
+        const idempotencyPayload = {
+          tenantId: context.tenantId,
+          scope,
+          actorId,
+          key: idempotencyKey,
+          requestHash,
+          status: "COMPLETED",
+          responseStatus: 201,
+          responseBody: { success: true, data: booking },
+          expiresAt: new Date(Date.now() + 86400 * 1000),
+        };
+
+        await (tx.idempotencyKey as any).upsert({
+          where: {
+            tenantId_scope_actorId_key: {
+              tenantId: context.tenantId,
+              scope,
+              actorId,
+              key: idempotencyKey,
+            },
+          },
+          create: idempotencyPayload,
+          update: {
+            status: "COMPLETED",
+            responseStatus: 201,
+            responseBody: { success: true, data: booking },
+            lockOwnerToken: null,
+            lockedUntil: null,
+            expiresAt: new Date(Date.now() + 86400 * 1000),
+          },
+        });
+      }
+
+      return booking;
     });
   };
 
@@ -188,7 +238,7 @@ export const createBookingRepositoryAdapter = () => createBookingRepository();
 export const BookingRepositoryAdapter = function (this: unknown) {
   return createBookingRepository();
 } as unknown as {
-  new (): ReturnType<typeof createBookingRepository>;
+  new(): ReturnType<typeof createBookingRepository>;
 };
 
 export const BookingRepository = BookingRepositoryAdapter as unknown as typeof BookingRepositoryAdapter &

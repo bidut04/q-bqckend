@@ -13,8 +13,10 @@ export const redisKeys = {
   rateLimit: (context: TenantContext, userId: string): string =>
     `tenant:${context.tenantId}:rate-limit:${userId}`,
 
-  idempotency: (context: TenantContext, key: string): string =>
-    `tenant:${context.tenantId}:idempotency:${key}`,
+  idempotency: (context: TenantContext, key: string, scope = "DEFAULT", actorId?: string): string => {
+    const actor = actorId || context.userId || "ANONYMOUS";
+    return `tenant:${context.tenantId}:idempotency:${scope}:${actor}:${key}`;
+  },
 
   shardCatalog: (tenantId: string): string =>
     `tenant:${tenantId}:shard`,

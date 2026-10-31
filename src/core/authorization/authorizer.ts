@@ -17,13 +17,13 @@ export const authorize = (
   requiredPermission: Permission,
   targetResource?: AuthorizationResource
 ): void => {
-  // 1. Check Platform Super Admin bypass (ONLY for explicit platform permissions or authorized support session)
+  // 1. Check Platform Super Admin bypass
   const isPlatformUser = context.roleIds.some(
     (r) => r === Role.PLATFORM_OWNER || r === Role.PLATFORM_ADMIN || r === Role.PLATFORM_SUPPORT
   );
 
-  if (isPlatformUser && requiredPermission.startsWith("platform:")) {
-    if (!context.permissions.includes(requiredPermission)) {
+  if (isPlatformUser) {
+    if (requiredPermission.startsWith("platform:") && !context.permissions.includes(requiredPermission)) {
       throw new ForbiddenError(`Platform permission '${requiredPermission}' is required`);
     }
     return;

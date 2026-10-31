@@ -3,6 +3,7 @@ import { Role } from "@prisma/client";
 import { verifyAccessToken } from "../security/jwt";
 import { UnauthorizedError } from "../lib/errors";
 import { redisSecurityCache } from "../service/redis.service";
+import { prisma } from "../config/prisma";
 
 export const requireAuth = async (
     req: Request,
@@ -13,11 +14,10 @@ export const requireAuth = async (
         const authHeader = req.headers.authorization;
         let token: string | undefined;
 
-        if (authHeader && authHeader.startsWith("Bearer ")) {
+        if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
             token = authHeader.substring(7).trim();
         }
 
-        // Clean up any foreign cookie named accessToken on localhost
         if (req.cookies && req.cookies.accessToken) {
             _res.clearCookie("accessToken");
         }
@@ -28,8 +28,6 @@ export const requireAuth = async (
 
         const payload = verifyAccessToken(token);
 
-        // Security check: verify securityVersion against Redis cache if available
-        // Immediately invalidates access tokens if password was changed or logout-all occurred
         if (payload.securityVersion !== undefined) {
             const currentVersion = await redisSecurityCache.getSecurityVersion(payload.sub);
             if (currentVersion !== null && currentVersion > payload.securityVersion) {
@@ -37,9 +35,52 @@ export const requireAuth = async (
             }
         }
 
+        const userWithTenants = await prisma.user.findUnique({
+            where: { id: payload.sub },
+            select: {
+                email: true,
+                platformMember: { select: { role: true, status: true } },
+                tenantMemberships: {
+                    where: { status: "ACTIVE" },
+                    select: { tenantId: true, adminRole: true }
+                }
+            }
+        });
+
+        const isSuperAdmin = userWithTenants?.platformMember?.status === "ACTIVE";
+
+        const rawHeaderTenantId = req.headers["x-tenant-id"] ?? req.headers["x-tenant"];
+        const headerTenantId = typeof rawHeaderTenantId === "string" ? rawHeaderTenantId.trim() : undefined;
+
+        let activeTenantId: string | undefined;
+        const primaryMembership = userWithTenants?.tenantMemberships?.[0];
+
+        if (isSuperAdmin) {
+            if (headerTenantId) {
+                activeTenantId = headerTenantId;
+            } else if (primaryMembership?.tenantId) {
+                activeTenantId = primaryMembership.tenantId;
+            }
+        } else {
+            if (headerTenantId) {
+                const isMemberOfHeaderTenant = userWithTenants?.tenantMemberships?.some(
+                    (m) => m.tenantId === headerTenantId
+                );
+                if (isMemberOfHeaderTenant) {
+                    activeTenantId = headerTenantId;
+                } else if (primaryMembership?.tenantId) {
+                    activeTenantId = primaryMembership.tenantId;
+                }
+            } else if (primaryMembership?.tenantId) {
+                activeTenantId = primaryMembership.tenantId;
+            }
+        }
+
         req.user = {
             id: payload.sub,
-            email: "",
+            email: userWithTenants?.email ?? "",
+            tenantId: activeTenantId,
+            isSuperAdmin,
             role: payload.role as Role,
             securityVersion: payload.securityVersion,
             sessionId: payload.sid,

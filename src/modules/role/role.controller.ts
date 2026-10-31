@@ -7,6 +7,8 @@ import {
   assignPermissionSchema,
   scopedRoleAssignmentSchema,
   checkPermissionsQuerySchema,
+  savePermissionsMatrixSchema,
+  getPermissionsMatrixQuerySchema,
 } from "./role.validation";
 
 const getParam = (param: string | string[] | undefined): string => {
@@ -148,6 +150,28 @@ export const createRoleController = (roleService: RoleService) => {
     }
   };
 
+  const getPermissionsMatrix = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const query = getPermissionsMatrixQuerySchema.parse(req.query);
+      const result = await roleService.getPermissionsMatrix(context, query.roleId);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  const savePermissionsMatrix = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const context = getTenantContextFromRequest(req);
+      const body = savePermissionsMatrixSchema.parse(req.body);
+      const result = await roleService.savePermissionsMatrix(context, body.modules, body.roleId);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     getRoles,
     getRoleById,
@@ -161,6 +185,8 @@ export const createRoleController = (roleService: RoleService) => {
     getUserRoleAssignments,
     getEffectivePermissions,
     getAvailablePermissions,
+    getPermissionsMatrix,
+    savePermissionsMatrix,
   };
 };
 

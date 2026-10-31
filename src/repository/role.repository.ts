@@ -379,6 +379,75 @@ export const createRoleRepository = () => {
     return Array.from(permissionsSet);
   };
 
+  const getMatrixNamespace = (roleId?: string): string => {
+    if (roleId && roleId !== "default" && roleId !== "custom") {
+      return ("pm_" + roleId).slice(0, 40);
+    }
+    return "permissions_matrix";
+  };
+
+  const findPermissionsMatrix = async (context: TenantContext, roleId?: string) => {
+    const db = await getTenantDb(context);
+    const namespace = getMatrixNamespace(roleId);
+    const setting = await db.tenantSetting.findUnique({
+      where: {
+        tenantId_namespace: {
+          tenantId: context.tenantId,
+          namespace,
+        },
+      },
+    });
+
+    if (!setting) {
+      // If role-specific not found, fallback to tenant-wide default
+      if (namespace !== "permissions_matrix") {
+        const defaultSetting = await db.tenantSetting.findUnique({
+          where: {
+            tenantId_namespace: {
+              tenantId: context.tenantId,
+              namespace: "permissions_matrix",
+            },
+          },
+        });
+        return defaultSetting ? defaultSetting.value : null;
+      }
+      return null;
+    }
+
+    return setting.value;
+  };
+
+  const savePermissionsMatrix = async (
+    context: TenantContext,
+    modules: any[],
+    roleId?: string
+  ) => {
+    const db = await getTenantDb(context);
+    const namespace = getMatrixNamespace(roleId);
+
+    const setting = await db.tenantSetting.upsert({
+      where: {
+        tenantId_namespace: {
+          tenantId: context.tenantId,
+          namespace,
+        },
+      },
+      create: {
+        tenantId: context.tenantId,
+        namespace,
+        value: modules as Prisma.InputJsonValue,
+        updatedBy: context.userId,
+      },
+      update: {
+        value: modules as Prisma.InputJsonValue,
+        updatedBy: context.userId,
+        version: { increment: 1 },
+      },
+    });
+
+    return setting.value;
+  };
+
   return {
     findRoleById,
     findRoles,
@@ -392,6 +461,8 @@ export const createRoleRepository = () => {
     removeScopedRole,
     getUserRoleAssignments,
     getEffectiveUserPermissions,
+    findPermissionsMatrix,
+    savePermissionsMatrix,
   };
 };
 

@@ -25,9 +25,48 @@ export const createBranchRepository = () => {
     });
   };
 
+  const create = async (context: TenantContext, data: { name: string; code?: string; address?: unknown; phone?: string }) => {
+    const db = await getTenantDb(context);
+    const delegate = (db as any).branch ?? db.location;
+    return delegate.create({
+      data: {
+        tenantId: context.tenantId,
+        name: data.name,
+        code: data.code || `BR-${Date.now().toString().slice(-4)}`,
+        address: data.address as any,
+        phone: data.phone,
+        status: "ACTIVE",
+      },
+    });
+  };
+
+  const update = async (context: TenantContext, branchId: string, data: { name?: string; address?: unknown; phone?: string }) => {
+    const db = await getTenantDb(context);
+    const delegate = (db as any).branch ?? db.location;
+    return delegate.update({
+      where: { id: branchId },
+      data: {
+        ...(data.name ? { name: data.name } : {}),
+        ...(data.address !== undefined ? { address: data.address as any } : {}),
+        ...(data.phone !== undefined ? { phone: data.phone } : {}),
+      },
+    });
+  };
+
+  const deleteBranch = async (context: TenantContext, branchId: string) => {
+    const db = await getTenantDb(context);
+    const delegate = (db as any).branch ?? db.location;
+    return delegate.delete({
+      where: { id: branchId },
+    });
+  };
+
   return {
     findById,
     findAllForTenant,
+    create,
+    update,
+    delete: deleteBranch,
   };
 };
 

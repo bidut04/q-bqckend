@@ -695,7 +695,7 @@ model TenantReviewLog {
   id         String       @id @default(cuid())
   tenantId   String
   tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  reviewerId String       // Super Admin user ID who reviewed
+  reviewerId String // Super Admin user ID who reviewed
   action     ReviewAction // APPROVED | REJECTED | SUSPENDED | REACTIVATED
   fromStatus TenantStatus
   toStatus   TenantStatus
@@ -712,7 +712,6 @@ enum ReviewAction {
   SUSPENDED
   REACTIVATED
 }
-
 
 model Location {
   id       String  @id @default(cuid())
@@ -1316,10 +1315,15 @@ model ServiceStatistic {
 model IdempotencyKey {
   id String @id @default(uuid())
 
-  tenantId String
+  tenantId    String  @db.VarChar(191)
+  scope       String? @default("DEFAULT") @db.VarChar(64) // BOOKING_CREATE, EMPLOYEE_INVITE ...
+  actorId     String? @default("ANONYMOUS") @db.VarChar(191)
+  key         String  @db.VarChar(128)
+  requestHash String  @db.VarChar(191)
 
-  key         String
-  requestHash String
+  status         String?   @default("IN_PROGRESS") @db.VarChar(32) // IN_PROGRESS, COMPLETED, FAILED
+  lockOwnerToken String?   @db.VarChar(128)
+  lockedUntil    DateTime?
 
   responseStatus Int?
   responseBody   Json?
@@ -1328,11 +1332,7 @@ model IdempotencyKey {
 
   createdAt DateTime @default(now())
 
-  // [NEW]
-  scope   String? @db.VarChar(64) // BOOKING_CREATE, EMPLOYEE_INVITE ...
-  actorId String?
-
-  @@unique([tenantId, key])
+  @@unique([tenantId, scope, actorId, key], map: "IdempotencyKey_tenant_scope_actor_key_idx")
   @@index([expiresAt])
 }
 

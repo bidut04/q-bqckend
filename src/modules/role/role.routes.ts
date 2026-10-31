@@ -10,6 +10,10 @@ export const createRoleRouter = (controller: RoleController) => {
   router.get("/permissions", controller.getAvailablePermissions);
   router.get("/effective-permissions", controller.getEffectivePermissions);
 
+  // Permissions Matrix (Dynamic RBAC)
+  router.get("/matrix", controller.getPermissionsMatrix);
+  router.put("/matrix", controller.savePermissionsMatrix);
+
   // Scoped Role Assignments (Hybrid RBAC)
   router.get("/users/:userId/assignments", controller.getUserRoleAssignments);
   router.post("/assignments", controller.assignScopedRole);

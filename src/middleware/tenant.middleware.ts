@@ -13,7 +13,18 @@ export async function tenantShardingMiddleware(
   next: NextFunction
 ): Promise<void> {
   const user = req.user;
-  const tenantId = user?.tenantId || req.tenantId;
+  const rawHeaderTenant = req.headers["x-tenant-id"] ?? req.headers["x-tenant"];
+  const headerTenant = typeof rawHeaderTenant === "string" ? rawHeaderTenant.trim() : undefined;
+
+  let tenantId: string | undefined;
+  if (user?.tenantId) {
+    tenantId = user.tenantId;
+  } else if (req.tenantId) {
+    tenantId = req.tenantId;
+  } else if (headerTenant) {
+    tenantId = headerTenant;
+  }
+
   if (!tenantId) {
     return next();
   }
@@ -25,11 +36,18 @@ export async function tenantShardingMiddleware(
     req.shardId = shardId;
     res.setHeader("X-Resolved-Shard", shardId);
 
+    let actorId = "anonymous";
+    if (user?.id) {
+      actorId = user.id;
+    } else if (user?.email) {
+      actorId = user.email;
+    }
+
     TenantContext.run(
       {
         tenantId,
         shardId,
-        userId: user?.id || (user as any)?.sub || user?.email || "anonymous",
+        userId: actorId,
       },
       () => {
         next();

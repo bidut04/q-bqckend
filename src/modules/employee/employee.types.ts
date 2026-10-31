@@ -6,6 +6,8 @@ export interface CreateEmployeeDTO {
   email?: string;
   phone?: string;
   department?: string;
+  branch?: string;
+  role?: string;
   status?: EmployeeStatus;
   userId?: string;
   locationId?: string;
@@ -17,8 +19,12 @@ export interface UpdateEmployeeDTO {
   email?: string;
   phone?: string;
   department?: string;
+  branch?: string;
+  role?: string;
   status?: EmployeeStatus;
   userId?: string;
+  locationId?: string;
+  roleId?: string;
 }
 
 export interface AssignBranchDTO {

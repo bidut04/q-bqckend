@@ -9,6 +9,8 @@ export interface CreateEmployeeData {
   email?: string;
   phone?: string;
   department?: string;
+  branch?: string;
+  role?: string;
   status?: EmployeeStatus;
   userId?: string;
   locationId?: string;
@@ -20,8 +22,12 @@ export interface UpdateEmployeeData {
   email?: string;
   phone?: string;
   department?: string;
+  branch?: string;
+  role?: string;
   status?: EmployeeStatus;
   userId?: string;
+  locationId?: string;
+  roleId?: string;
 }
 
 export interface EmployeeFilter {
@@ -153,6 +159,85 @@ export const createEmployeeRepository = () => {
     };
   };
 
+  const resolveLocationId = async (
+    context: TenantContext,
+    locationId?: string,
+    branch?: string
+  ): Promise<string | undefined> => {
+    const db = await getTenantDb(context);
+    const delegate = (db as any).branch ?? db.location;
+
+    if (locationId) {
+      const loc = await delegate.findFirst({
+        where: withTenantScope(context, { id: locationId }),
+      });
+      if (loc) return loc.id;
+    }
+
+    if (branch && branch.trim()) {
+      const trimmed = branch.trim();
+      const loc = await delegate.findFirst({
+        where: {
+          tenantId: context.tenantId,
+          OR: [{ id: trimmed }, { name: trimmed }, { code: trimmed }],
+        },
+      });
+      if (loc) return loc.id;
+
+      // Auto-create location for tenant so branch association succeeds
+      const newLoc = await delegate.create({
+        data: {
+          tenantId: context.tenantId,
+          name: trimmed,
+          code: `LOC-${Date.now().toString().slice(-4)}`,
+          status: "ACTIVE",
+        },
+      });
+      return newLoc.id;
+    }
+
+    return undefined;
+  };
+
+  const resolveRoleId = async (
+    context: TenantContext,
+    roleId?: string,
+    role?: string
+  ): Promise<string | undefined> => {
+    const db = await getTenantDb(context);
+
+    if (roleId) {
+      const r = await db.tenantRole.findFirst({
+        where: withTenantScope(context, { id: roleId }),
+      });
+      if (r) return r.id;
+    }
+
+    if (role && role.trim()) {
+      const trimmed = role.trim();
+      const r = await db.tenantRole.findFirst({
+        where: {
+          tenantId: context.tenantId,
+          OR: [{ id: trimmed }, { name: trimmed }],
+        },
+      });
+      if (r) return r.id;
+
+      // Auto-create tenant role so role association succeeds
+      const newRole = await db.tenantRole.create({
+        data: {
+          tenantId: context.tenantId,
+          name: trimmed,
+          description: `${trimmed} role for staff`,
+          isSystem: false,
+        },
+      });
+      return newRole.id;
+    }
+
+    return undefined;
+  };
+
   const create = async (context: TenantContext, data: CreateEmployeeData) => {
     const db = await getTenantDb(context);
 
@@ -161,6 +246,9 @@ export const createEmployeeRepository = () => {
     if (existing) {
       throw new Error(`Employee with code '${data.employeeCode}' already exists in this tenant`);
     }
+
+    const targetLocationId = await resolveLocationId(context, data.locationId, data.branch);
+    const targetRoleId = await resolveRoleId(context, data.roleId, data.role);
 
     const employee = await db.employee.create({
       data: {
@@ -172,21 +260,21 @@ export const createEmployeeRepository = () => {
         department: data.department,
         status: data.status || EmployeeStatus.ACTIVE,
         userId: data.userId,
-        ...(data.locationId
+        ...(targetLocationId
           ? {
               locations: {
                 create: {
-                  locationId: data.locationId,
+                  locationId: targetLocationId,
                   isPrimary: true,
                 },
               },
             }
           : {}),
-        ...(data.roleId
+        ...(targetRoleId
           ? {
               roles: {
                 create: {
-                  roleId: data.roleId,
+                  roleId: targetRoleId,
                 },
               },
             }
@@ -204,6 +292,36 @@ export const createEmployeeRepository = () => {
   const update = async (context: TenantContext, id: string, data: UpdateEmployeeData) => {
     const db = await getTenantDb(context);
     await findById(context, id);
+
+    const targetLocationId = await resolveLocationId(context, data.locationId, data.branch);
+    const targetRoleId = await resolveRoleId(context, data.roleId, data.role);
+
+    // 1. Update location association if provided
+    if (targetLocationId) {
+      await db.employeeLocation.deleteMany({
+        where: { employeeId: id },
+      });
+      await db.employeeLocation.create({
+        data: {
+          employeeId: id,
+          locationId: targetLocationId,
+          isPrimary: true,
+        },
+      });
+    }
+
+    // 2. Update role association if provided
+    if (targetRoleId) {
+      await db.employeeRole.deleteMany({
+        where: { employeeId: id },
+      });
+      await db.employeeRole.create({
+        data: {
+          employeeId: id,
+          roleId: targetRoleId,
+        },
+      });
+    }
 
     return db.employee.update({
       where: { id },

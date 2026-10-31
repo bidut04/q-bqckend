@@ -37,6 +37,10 @@ import { createOrganizationController } from "../modules/organization/organizati
 import { createPlatformController } from "../modules/platform/platform.controller";
 import { createEmployeeController } from "../modules/employee/employee.controller";
 import { createRoleController } from "../modules/role/role.controller";
+import { createBranchController } from "../modules/branch/branch.controller";
+import { createDepartmentController } from "../modules/department/department.controller";
+import { createServiceController } from "../modules/service/service.controller";
+import { createCategoryController } from "../modules/category/category.controller";
 
 export const createContainer = () => {
   // Repositories
@@ -90,6 +94,10 @@ export const createContainer = () => {
   });
   const employeeController = createEmployeeController(employeeService);
   const roleController = createRoleController(roleService);
+  const branchController = createBranchController(branchRepository);
+  const departmentController = createDepartmentController();
+  const serviceController = createServiceController();
+  const categoryController = createCategoryController();
 
   return {
     prisma,
@@ -128,6 +136,10 @@ export const createContainer = () => {
       platform: platformController,
       employee: employeeController,
       role: roleController,
+      branch: branchController,
+      department: departmentController,
+      service: serviceController,
+      category: categoryController,
     },
   };
 };

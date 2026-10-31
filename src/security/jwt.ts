@@ -21,7 +21,7 @@ const getJwtAudience = () =>
 export function createAccessToken(payload: Omit<AccessTokenPayload, "jti">): string {
   const options: SignOptions = {
     algorithm: "HS256",
-    expiresIn: "10m",
+    expiresIn: ((process.env.JWT_EXPIRES_IN || process.env.JWT_ACCESS_EXPIRES_IN || "10m") as unknown) as SignOptions["expiresIn"],
     issuer: getJwtIssuer(),
     audience: getJwtAudience(),
   };

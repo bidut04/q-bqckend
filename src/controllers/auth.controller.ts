@@ -16,7 +16,7 @@ export const createAuthController = (authService: AuthService) => {
     res.cookie("refreshToken", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
       path: "/api/v1/auth",
     });
@@ -26,7 +26,7 @@ export const createAuthController = (authService: AuthService) => {
     res.clearCookie("refreshToken", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       path: "/api/v1/auth",
     });
   };
@@ -276,6 +276,24 @@ export const createAuthController = (authService: AuthService) => {
     }
   };
 
+  const updateProfile = async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new AppError("Unauthorized", 401, "UNAUTHORIZED");
+      }
+      const { name, email, avatar } = req.body;
+      const updatedUser = await authService.updateUserProfile(userId, { name, email, avatar });
+      res.status(200).json({
+        success: true,
+        message: "Profile updated successfully",
+        user: updatedUser,
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   return {
     register,
     login,
@@ -286,6 +304,7 @@ export const createAuthController = (authService: AuthService) => {
     googleLogin,
     googleCallback,
     getMe,
+    updateProfile,
   };
 };
 

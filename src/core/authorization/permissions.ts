@@ -135,6 +135,13 @@ export const PLATFORM_ADMIN_PERMISSIONS: readonly Permission[] = Object.freeze([
   Permission.PLATFORM_MIGRATION_EXECUTE,
   Permission.PLATFORM_SUPPORT_ACCESS_CREATE,
   Permission.PLATFORM_SUPPORT_ACCESS_REVOKE,
+  Permission.ROLE_READ,
+  Permission.ROLE_ASSIGN,
+  Permission.ROLE_CREATE,
+  Permission.ROLE_UPDATE,
+  Permission.ROLE_DELETE,
+  Permission.BRANCH_READ,
+  Permission.EMPLOYEE_READ,
 ]);
 
 export const PLATFORM_OWNER_PERMISSIONS: readonly Permission[] = Object.freeze([
